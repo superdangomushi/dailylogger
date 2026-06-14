@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- filesDir/transcripts を共有可能にする -->
+    <files-path
+        name="transcripts"
+        path="transcripts/" />
+</paths>
