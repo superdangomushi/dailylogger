@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- 本番 (moneybot.jp など) は HTTPS のみ。 -->
+    <base-config cleartextTrafficPermitted="false" />
+
+    <!-- ローカルの受信サーバーで動作確認するとき向けに、開発用アドレスだけ
+         平文 HTTP を許可する。10.0.2.2 はエミュレータからホストPCを指す。 -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">10.0.2.2</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+        <domain includeSubdomains="true">192.168.0.0</domain>
+    </domain-config>
+</network-security-config>

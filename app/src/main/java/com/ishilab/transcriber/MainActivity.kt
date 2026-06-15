@@ -21,20 +21,27 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -44,6 +51,7 @@ import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.service.AudioCaptureService
 import com.ishilab.transcriber.service.ServiceState
 import com.ishilab.transcriber.ui.MainViewModel
+import com.ishilab.transcriber.ui.TranscriptItem
 import com.ishilab.transcriber.ui.UiState
 import java.io.File
 
@@ -69,6 +77,9 @@ class MainActivity : ComponentActivity() {
                         onStart = { AudioCaptureService.start(this) },
                         onStop = { AudioCaptureService.stop(this) },
                         onRefresh = viewModel::refresh,
+                        onLogin = viewModel::login,
+                        onLogout = viewModel::logout,
+                        onSend = viewModel::sendToMoneybot,
                     )
                 }
             }
@@ -101,6 +112,9 @@ private fun MainScreen(
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
+    onLogin: (String, String, String) -> Unit,
+    onLogout: () -> Unit,
+    onSend: (TranscriptItem) -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("常時録音・ローカル文字起こし") }) }
@@ -124,6 +138,12 @@ private fun MainScreen(
                 Text("エラー: $it", color = MaterialTheme.colorScheme.error)
             }
 
+            MoneybotCard(ui, onLogin, onLogout)
+
+            ui.sendMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -132,7 +152,7 @@ private fun MainScreen(
                 Text("文字起こしファイル", style = MaterialTheme.typography.titleMedium)
                 OutlinedButton(onClick = onRefresh) { Text("更新") }
             }
-            TranscriptList(ui)
+            TranscriptList(ui, onSend)
         }
     }
 }
@@ -209,8 +229,80 @@ private fun ModelDownloadCard(ui: UiState, onDownload: (WhisperModel) -> Unit) {
     }
 }
 
+/** moneybot.jp のログイン / アカウント表示。 */
 @Composable
-private fun TranscriptList(ui: UiState) {
+private fun MoneybotCard(
+    ui: UiState,
+    onLogin: (String, String, String) -> Unit,
+    onLogout: () -> Unit,
+) {
+    val account = ui.account
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("moneybot.jp 連携", style = MaterialTheme.typography.titleMedium)
+            if (account.loggedIn) {
+                Text("ログイン中: ${account.email}")
+                Text(account.baseUrl, style = MaterialTheme.typography.bodySmall)
+                TextButton(onClick = onLogout) { Text("ログアウト") }
+            } else {
+                MoneybotLoginForm(ui, onLogin)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MoneybotLoginForm(
+    ui: UiState,
+    onLogin: (String, String, String) -> Unit,
+) {
+    var baseUrl by rememberSaveable { mutableStateOf(ui.account.baseUrl) }
+    var email by rememberSaveable { mutableStateOf("") }
+    var token by rememberSaveable { mutableStateOf("") }
+
+    OutlinedTextField(
+        value = baseUrl,
+        onValueChange = { baseUrl = it },
+        label = { Text("サーバーURL") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
+    OutlinedTextField(
+        value = email,
+        onValueChange = { email = it },
+        label = { Text("アカウント (メール)") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth()
+    )
+    OutlinedTextField(
+        value = token,
+        onValueChange = { token = it },
+        label = { Text("トークン") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth()
+    )
+    Button(
+        onClick = { onLogin(baseUrl, email, token) },
+        enabled = !ui.loginInProgress,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        if (ui.loginInProgress) {
+            CircularProgressIndicator(
+                modifier = Modifier.height(18.dp),
+                strokeWidth = 2.dp
+            )
+        } else {
+            Text("ログイン")
+        }
+    }
+    ui.loginError?.let {
+        Text("ログイン失敗: $it", color = MaterialTheme.colorScheme.error)
+    }
+}
+
+@Composable
+private fun TranscriptList(ui: UiState, onSend: (TranscriptItem) -> Unit) {
     val context = LocalContext.current
     if (ui.transcripts.isEmpty()) {
         Text("まだファイルがありません。", style = MaterialTheme.typography.bodySmall)
@@ -226,6 +318,13 @@ private fun TranscriptList(ui: UiState) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(onClick = { shareFile(context, item.path) }) {
                             Text("共有")
+                        }
+                        val sending = ui.sendingFile == item.name
+                        Button(
+                            onClick = { onSend(item) },
+                            enabled = ui.account.loggedIn && ui.sendingFile == null
+                        ) {
+                            Text(if (sending) "送信中…" else "moneybotへ送信")
                         }
                     }
                 }

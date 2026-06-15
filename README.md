@@ -49,6 +49,27 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 3. 「録音開始」→ 通知が常駐し、文字起こしが `transcripts/` に蓄積される
 4. マイクを一時的に手放したいときは通知の「一時停止」、戻すときは「再開」
 
+### moneybot.jp への送信
+文字起こしファイルを `moneybot.jp` に送れる。事前に moneybot.jp 側でアカウントに
+**トークン**を発行しておき、アプリでそのアカウント情報＋トークンでログインする。
+サーバー側でアカウント情報とトークンの一致を確認できたときだけファイルが受け付けられる。
+
+- アプリ画面の「moneybot.jp 連携」でサーバーURL・アカウント(メール)・トークンを入力しログイン
+- 各文字起こしファイルの「moneybotへ送信」ボタンで `POST /api/upload` に本文を送信
+- 通信は追加ライブラリなし（`HttpURLConnection` + `org.json`）。本番は HTTPS、ローカル動作
+  確認用に `10.0.2.2` / `localhost` などへの平文 HTTP のみ許可（`res/xml/network_security_config.xml`）
+
+| 役割 | パス |
+| --- | --- |
+| 送信クライアント | `app/.../net/MoneybotClient.kt` |
+| ログイン情報の保存 | `app/.../net/AccountStore.kt` |
+
+受信側の簡易サーバー（Node.js + Express + MySQL）は `server/` にある。受け取った
+テキストは **MySQL に直接保存**し、Web サイト（`/`）から一覧・ダウンロードできる。
+`accounts.json` にアカウントとトークンを登録、`mysql -u root < schema.sql` で DB を
+用意して `npm install && npm start` で起動。詳細は `server/README.md`。
+
 ### 注意
 - 常時録音＋推論はバッテリー/発熱の負荷が大きい。端末の電池最適化からの除外を推奨。
 - 端末再起動後の自動再開・話者分離・音声保存は対象外（必要なら拡張可能）。
+- moneybot.jp 連携はゼミ課題向けの簡易実装（トークン平文保持・HTTP単純送信）。

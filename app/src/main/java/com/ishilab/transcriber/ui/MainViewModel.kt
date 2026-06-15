@@ -5,6 +5,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ishilab.transcriber.model.ModelManager
 import com.ishilab.transcriber.model.WhisperModel
+import com.ishilab.transcriber.net.AccountStore
+import com.ishilab.transcriber.net.MoneybotClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,12 +17,24 @@ import java.io.File
 
 data class TranscriptItem(val name: String, val path: String, val sizeBytes: Long)
 
+/** moneybot.jp のログイン状態。 */
+data class AccountState(
+    val loggedIn: Boolean = false,
+    val baseUrl: String = "https://moneybot.jp",
+    val email: String = "",
+)
+
 data class UiState(
     val downloadedModels: Set<WhisperModel> = emptySet(),
     val downloading: WhisperModel? = null,
     val downloadProgress: Float = 0f,
     val downloadError: String? = null,
     val transcripts: List<TranscriptItem> = emptyList(),
+    val account: AccountState = AccountState(),
+    val loginInProgress: Boolean = false,
+    val loginError: String? = null,
+    val sendingFile: String? = null,
+    val sendMessage: String? = null,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
 }
@@ -28,11 +42,14 @@ data class UiState(
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val modelManager = ModelManager(app)
+    private val accountStore = AccountStore(app)
+    private val moneybot = MoneybotClient()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
 
     init {
+        _ui.update { it.copy(account = currentAccount()) }
         refresh()
     }
 
@@ -65,4 +82,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
+
+    /** moneybot.jp にログイン。サーバーでアカウント情報＋トークンの一致を確認する。 */
+    fun login(baseUrl: String, email: String, token: String) {
+        if (_ui.value.loginInProgress) return
+        val url = baseUrl.trim()
+        val mail = email.trim()
+        val tok = token.trim()
+        if (url.isEmpty() || mail.isEmpty() || tok.isEmpty()) {
+            _ui.update { it.copy(loginError = "URL・メール・トークンをすべて入力してください") }
+            return
+        }
+        _ui.update { it.copy(loginInProgress = true, loginError = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { moneybot.login(url, mail, tok) }
+            when (result) {
+                is MoneybotClient.Result.Ok -> {
+                    accountStore.save(url, mail, tok)
+                    _ui.update {
+                        it.copy(loginInProgress = false, loginError = null, account = currentAccount())
+                    }
+                }
+                is MoneybotClient.Result.Error -> {
+                    _ui.update { it.copy(loginInProgress = false, loginError = result.message) }
+                }
+            }
+        }
+    }
+
+    fun logout() {
+        accountStore.logout()
+        _ui.update { it.copy(account = currentAccount(), sendMessage = null) }
+    }
+
+    /** 文字起こしファイルを moneybot.jp に送信する。ログイン中のアカウントで送る。 */
+    fun sendToMoneybot(item: TranscriptItem) {
+        if (!accountStore.loggedIn) {
+            _ui.update { it.copy(sendMessage = "先に moneybot.jp にログインしてください") }
+            return
+        }
+        if (_ui.value.sendingFile != null) return
+        _ui.update { it.copy(sendingFile = item.name, sendMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                moneybot.upload(
+                    accountStore.baseUrl, accountStore.email, accountStore.token, File(item.path)
+                )
+            }
+            val message = when (result) {
+                is MoneybotClient.Result.Ok -> result.message
+                is MoneybotClient.Result.Error -> "送信失敗: ${result.message}"
+            }
+            _ui.update { it.copy(sendingFile = null, sendMessage = message) }
+        }
+    }
+
+    fun clearSendMessage() {
+        _ui.update { it.copy(sendMessage = null) }
+    }
+
+    private fun currentAccount() = AccountState(
+        loggedIn = accountStore.loggedIn,
+        baseUrl = accountStore.baseUrl,
+        email = accountStore.email,
+    )
 }

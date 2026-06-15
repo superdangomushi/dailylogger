@@ -1,0 +1,14 @@
+{
+  "name": "moneybot-receiver",
+  "version": "1.0.0",
+  "description": "文字起こしテキストを受け取り MySQL に保存する moneybot.jp 側の簡易サーバー",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "mysql2": "^3.11.0"
+  }
+}
