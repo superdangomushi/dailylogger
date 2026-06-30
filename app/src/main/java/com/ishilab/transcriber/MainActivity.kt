@@ -80,6 +80,7 @@ class MainActivity : ComponentActivity() {
                         onLogin = viewModel::login,
                         onLogout = viewModel::logout,
                         onSend = viewModel::sendToMoneybot,
+                        onAsk = viewModel::ask,
                     )
                 }
             }
@@ -115,6 +116,7 @@ private fun MainScreen(
     onLogin: (String, String, String) -> Unit,
     onLogout: () -> Unit,
     onSend: (TranscriptItem) -> Unit,
+    onAsk: (String) -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("常時録音・ローカル文字起こし") }) }
@@ -139,6 +141,10 @@ private fun MainScreen(
             }
 
             MoneybotCard(ui, onLogin, onLogout)
+
+            if (ui.account.loggedIn) {
+                SecretaryCard(ui, onAsk)
+            }
 
             ui.sendMessage?.let {
                 Text(it, style = MaterialTheme.typography.bodySmall)
@@ -298,6 +304,49 @@ private fun MoneybotLoginForm(
     }
     ui.loginError?.let {
         Text("ログイン失敗: $it", color = MaterialTheme.colorScheme.error)
+    }
+}
+
+/** 秘書チャット: 「今日の予定は？」と聞けば回答、「予定入れといて」で登録まで実行。 */
+@Composable
+private fun SecretaryCard(ui: UiState, onAsk: (String) -> Unit) {
+    var question by rememberSaveable { mutableStateOf("") }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("秘書に聞く / 頼む", style = MaterialTheme.typography.titleMedium)
+            if (ui.chatLog.isEmpty()) {
+                Text(
+                    "例) 今日の予定は？ / 来週月曜10時にゼミ入れといて / 数学の宿題が出てるらしい",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            ui.chatLog.takeLast(8).forEach { msg ->
+                val prefix = if (msg.fromUser) "あなた: " else "秘書: "
+                Text(
+                    "$prefix${msg.text}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (msg.fromUser) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface
+                )
+            }
+            OutlinedTextField(
+                value = question,
+                onValueChange = { question = it },
+                label = { Text("メッセージ") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            Button(
+                onClick = { onAsk(question); question = "" },
+                enabled = !ui.askInProgress && question.isNotBlank(),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                if (ui.askInProgress) {
+                    CircularProgressIndicator(modifier = Modifier.height(18.dp), strokeWidth = 2.dp)
+                } else {
+                    Text("送信")
+                }
+            }
+        }
     }
 }
 

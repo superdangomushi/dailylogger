@@ -22,6 +22,7 @@ import androidx.core.content.ContextCompat
 import com.ishilab.transcriber.MainActivity
 import com.ishilab.transcriber.R
 import com.ishilab.transcriber.audio.AudioChunker
+import com.ishilab.transcriber.net.BackgroundSync
 import com.ishilab.transcriber.model.ModelManager
 import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.transcribe.TranscriptStore
@@ -47,6 +48,7 @@ class AudioCaptureService : Service() {
     private var engine: TranscriptionEngine? = null
 
     private lateinit var wakeLock: PowerManager.WakeLock
+    private var backgroundSync: BackgroundSync? = null
 
     private val chunkQueue = LinkedBlockingQueue<FloatArray>(QUEUE_CAPACITY)
 
@@ -89,6 +91,8 @@ class AudioCaptureService : Service() {
         // モデル読み込み＋ワーカー起動はバックグラウンドで
         workerThread = Thread({ runWorker() }, "transcribe-worker").also { it.start() }
         startRecording()
+        // 定期アップロード＋リマインド通知（ログイン済みのときだけ実働）。
+        backgroundSync = BackgroundSync(applicationContext).also { it.start() }
         pushState { it.copy(active = true, paused = false, error = null) }
     }
 
@@ -107,6 +111,8 @@ class AudioCaptureService : Service() {
 
     private fun stopEverything() {
         serviceActive.set(false)
+        backgroundSync?.stop()
+        backgroundSync = null
         stopRecording()
         // ワーカーに終了を通知（poison pill）。キューが満杯でも確実に止めるため interrupt も行う。
         chunkQueue.offer(POISON)
