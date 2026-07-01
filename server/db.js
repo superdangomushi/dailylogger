@@ -81,6 +81,20 @@ async function ensureSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
+  // Web から自己登録したユーザー（メール＋パスワード）。パスワードは sha256(salt+password) で保存。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      email         VARCHAR(255) NOT NULL,
+      salt          CHAR(32)     NOT NULL,
+      password_hash CHAR(64)     NOT NULL,
+      token         CHAR(48)     NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_users_email (email),
+      KEY idx_users_token (token)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
   // 既存テーブルに後付けカラムを足す（MySQL は ADD COLUMN IF NOT EXISTS 非対応のため自前判定）。
   await addColumnIfMissing("transcripts", "kadai_json", "LONGTEXT NULL");
   await addColumnIfMissing("transcripts", "yotei_json", "LONGTEXT NULL");
@@ -374,9 +388,54 @@ async function listEmailsWithTasks() {
   return rows.map((r) => r.email);
 }
 
+// =====================================================================
+// ユーザー（自己登録アカウント）
+// =====================================================================
+
+async function createUser(email, salt, passwordHash, token) {
+  await pool.query(
+    `INSERT INTO users (email, salt, password_hash, token) VALUES (?, ?, ?, ?)`,
+    [email, salt, passwordHash, token]
+  );
+}
+
+async function getUserByEmail(email) {
+  const [rows] = await pool.query(
+    `SELECT email, salt, password_hash, token FROM users WHERE email = ? LIMIT 1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
+async function getUserByToken(email, token) {
+  const [rows] = await pool.query(
+    `SELECT email, token FROM users WHERE email = ? AND token = ? LIMIT 1`,
+    [email, token]
+  );
+  return rows[0] || null;
+}
+
+async function updateUserPassword(email, salt, passwordHash) {
+  await pool.query(
+    `UPDATE users SET salt = ?, password_hash = ? WHERE email = ?`,
+    [salt, passwordHash, email]
+  );
+}
+
+async function userExists(email) {
+  const [rows] = await pool.query(`SELECT 1 FROM users WHERE email = ? LIMIT 1`, [email]);
+  return rows.length > 0;
+}
+
 module.exports = {
   pool,
   ensureSchema,
+  // users
+  createUser,
+  getUserByEmail,
+  getUserByToken,
+  updateUserPassword,
+  userExists,
   // transcripts
   saveTranscript,
   saveAnalysis,

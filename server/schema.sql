@@ -63,6 +63,18 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
   UNIQUE KEY uq_email_day (email, day)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+-- Web から自己登録したユーザー。パスワードは sha256(salt + password) で保存（平文は持たない）。
+CREATE TABLE IF NOT EXISTS users (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  email         VARCHAR(255) NOT NULL,
+  salt          CHAR(32)     NOT NULL,
+  password_hash CHAR(64)     NOT NULL,
+  token         CHAR(48)     NOT NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_users_email (email),
+  KEY idx_users_token (token)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 -- 送信済みリマインド通知の記録（履歴・二重送信防止の補助）。
 CREATE TABLE IF NOT EXISTS notifications (
   id         INT AUTO_INCREMENT PRIMARY KEY,

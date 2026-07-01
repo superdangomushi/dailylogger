@@ -20,8 +20,6 @@ const reminders = require("./reminders");
 
 const PORT = process.env.PORT || 3000;
 const ACCOUNTS_FILE = path.join(__dirname, "accounts.json");
-// Web から自己登録したユーザー（メール＋パスワード）を保存するファイル。
-const USERS_FILE = path.join(__dirname, "users.json");
 // 日次サマリの送信時刻（サーバーのローカル時刻）。"HH:MM" 形式。既定 21:00。
 const SUMMARY_TIME = process.env.DAILY_SUMMARY_TIME || "21:00";
 
@@ -40,50 +38,25 @@ function loadAccounts() {
   }
 }
 
-// ---- 自己登録ユーザー (users.json) ----
-function loadUsers() {
-  try {
-    return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
-  } catch {
-    return []; // ファイルが無ければ空
-  }
+// ---- 自己登録ユーザー（MySQL 保存・sha256 ハッシュ） ----
+// パスワードは平文で持たず、sha256(salt + password) の16進のみを保存する。
+function sha256(salt, password) {
+  return crypto.createHash("sha256").update(salt + String(password)).digest("hex");
 }
-
-function saveUsers(users) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+function genSalt() {
+  return crypto.randomBytes(16).toString("hex"); // 32 hex chars
 }
-
-function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
-  const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
-  return { salt, hash };
-}
-
-function verifyPassword(password, salt, expected) {
-  const h = crypto.scryptSync(String(password), salt, 64).toString("hex");
-  const a = Buffer.from(h);
-  const b = Buffer.from(expected);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
 function genToken() {
-  return crypto.randomBytes(24).toString("hex");
+  return crypto.randomBytes(24).toString("hex"); // 48 hex chars
 }
 
-// email + password でユーザーを照合し、成功したらアカウント相当を返す。
-function findUserByPassword(email, password) {
-  if (!email || !password) return null;
-  const u = loadUsers().find((x) => x.email === email);
-  if (!u || !verifyPassword(password, u.salt, u.hash)) return null;
-  return { email: u.email, token: u.token, lineUserId: u.lineUserId || "" };
-}
-
-function findAccount(email, token) {
+// email + token を accounts.json → DB の順で照合し、アカウント相当を返す（非同期）。
+async function resolveAccount(email, token) {
   if (!email || !token) return null;
   const acc = loadAccounts().find((a) => a.email === email && a.token === token);
   if (acc) return acc;
-  // accounts.json に無ければ自己登録ユーザーのトークンも照合する。
-  const u = loadUsers().find((x) => x.email === email && x.token === token);
-  return u ? { email: u.email, token: u.token, lineUserId: u.lineUserId || "" } : null;
+  const u = await db.getUserByToken(email, token);
+  return u ? { email: u.email, token: u.token, lineUserId: "" } : null;
 }
 
 // email から LINE の送信先 userId を引く（リマインドエンジンが使う）。
@@ -98,8 +71,8 @@ function escapeHtml(s) {
   );
 }
 
-// API 用の認証ヘルパ。body / query / ヘッダのいずれかから email+token を取り、照合する。
-function authFromReq(req) {
+// API 用の認証ヘルパ。body / query / ヘッダのいずれかから email+token を取り、照合する（非同期）。
+async function authFromReq(req) {
   const email =
     req.get("X-Account-Email") || req.body?.email || req.query.email || "";
   const token =
@@ -107,7 +80,7 @@ function authFromReq(req) {
     req.body?.token ||
     req.query.token ||
     "";
-  return findAccount(email, token);
+  return resolveAccount(email, token);
 }
 
 // =====================================================================
@@ -115,7 +88,7 @@ function authFromReq(req) {
 // =====================================================================
 
 // 新規ユーザー登録（Web 用）。メール＋パスワードで登録し、API 用トークンを発行する。
-app.post("/api/register", (req, res) => {
+app.post("/api/register", async (req, res) => {
   const email = String(req.body?.email || "").trim();
   const password = String(req.body?.password || "");
   if (!email || !password) {
@@ -127,70 +100,76 @@ app.post("/api/register", (req, res) => {
   if (password.length < 6) {
     return res.status(400).json({ ok: false, error: "パスワードは6文字以上にしてください" });
   }
-  // 既存（accounts.json / users.json）と重複しないこと。
-  if (loadAccounts().some((a) => a.email === email) ||
-      loadUsers().some((u) => u.email === email)) {
-    return res.status(409).json({ ok: false, error: "このメールは既に登録されています" });
-  }
-  const { salt, hash } = hashPassword(password);
-  const token = genToken();
-  const users = loadUsers();
-  users.push({ email, salt, hash, token, createdAt: new Date().toISOString() });
+  // 既存（accounts.json / DB users）と重複しないこと。
   try {
-    saveUsers(users);
+    if (loadAccounts().some((a) => a.email === email) || (await db.userExists(email))) {
+      return res.status(409).json({ ok: false, error: "このメールは既に登録されています" });
+    }
+    const salt = genSalt();
+    const passwordHash = sha256(salt, password);
+    const token = genToken();
+    await db.createUser(email, salt, passwordHash, token);
+    console.log(`ユーザー登録: ${email}`);
+    res.json({ ok: true, email, token });
   } catch (e) {
-    console.error("users.json 保存に失敗:", e.message);
-    return res.status(500).json({ ok: false, error: "登録の保存に失敗しました" });
+    console.error("ユーザー登録に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "登録の保存に失敗しました" });
   }
-  console.log(`ユーザー登録: ${email}`);
-  res.json({ ok: true, email, token });
 });
 
 // ログイン。Web はメール＋パスワード、アプリはメール＋トークンで照合する。
 // いずれも成功時は API 用トークンを返す（Web はこれを保存して以降の API に使う）。
-app.post("/api/login", (req, res) => {
+app.post("/api/login", async (req, res) => {
   const { email, token, password } = req.body || {};
-  const account = password ? findUserByPassword(email, password) : findAccount(email, token);
-  if (!account) {
-    return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  try {
+    let account = null;
+    if (password) {
+      const u = await db.getUserByEmail(email);
+      if (u && u.password_hash === sha256(u.salt, password)) {
+        account = { email: u.email, token: u.token, lineUserId: "" };
+      }
+    } else {
+      account = await resolveAccount(email, token);
+    }
+    if (!account) {
+      return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+    }
+    res.json({ ok: true, email: account.email, token: account.token, line: Boolean(account.lineUserId) });
+  } catch (e) {
+    console.error("ログイン処理に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "サーバーエラー" });
   }
-  res.json({ ok: true, email: account.email, token: account.token, line: Boolean(account.lineUserId) });
 });
 
-// パスワード変更（自己登録ユーザーのみ）。現在のパスワードで本人確認する。
-app.post("/api/change-password", (req, res) => {
-  const account = authFromReq(req);
+// パスワード変更（自己登録ユーザーのみ）。現在のパスワードで本人確認する。トークンは変えない。
+app.post("/api/change-password", async (req, res) => {
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   const currentPassword = String(req.body?.currentPassword || "");
   const newPassword = String(req.body?.newPassword || "");
   if (newPassword.length < 6) {
     return res.status(400).json({ ok: false, error: "新しいパスワードは6文字以上にしてください" });
   }
-  const users = loadUsers();
-  const u = users.find((x) => x.email === account.email);
-  if (!u) {
-    return res.status(400).json({ ok: false, error: "このアカウントはパスワード変更に対応していません" });
-  }
-  if (!verifyPassword(currentPassword, u.salt, u.hash)) {
-    return res.status(401).json({ ok: false, error: "現在のパスワードが違います" });
-  }
-  const { salt, hash } = hashPassword(newPassword);
-  u.salt = salt;
-  u.hash = hash;
   try {
-    saveUsers(users);
+    const u = await db.getUserByEmail(account.email);
+    if (!u) {
+      return res.status(400).json({ ok: false, error: "このアカウントはパスワード変更に対応していません" });
+    }
+    if (u.password_hash !== sha256(u.salt, currentPassword)) {
+      return res.status(401).json({ ok: false, error: "現在のパスワードが違います" });
+    }
+    const salt = genSalt();
+    await db.updateUserPassword(account.email, salt, sha256(salt, newPassword));
+    res.json({ ok: true });
   } catch (e) {
-    console.error("users.json 保存に失敗:", e.message);
-    return res.status(500).json({ ok: false, error: "保存に失敗しました" });
+    console.error("パスワード変更に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "保存に失敗しました" });
   }
-  res.json({ ok: true });
 });
 
 // 文字起こしテキストの受信 → MySQL に保存 → Gemini で課題/予定/要約を抽出。
 app.post("/api/upload", async (req, res) => {
-  const email = req.get("X-Account-Email");
-  const token = (req.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-  const account = findAccount(email, token);
+  const account = await authFromReq(req);
   if (!account) {
     return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
   }
@@ -244,7 +223,7 @@ app.post("/api/upload", async (req, res) => {
 // POST /api/ask  body: { email, token, question }
 // 質問に答え、依頼（予定追加・完了化）なら実行する。
 app.post("/api/ask", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
   if (!gemini.isConfigured()) {
     return res.status(503).json({ ok: false, error: "Gemini が未設定です（GEMINI_API_KEY）" });
@@ -304,7 +283,7 @@ function resolveTaskTarget(tasks, target) {
 // =====================================================================
 
 app.get("/api/tasks", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   const includeDone = req.query.done === "1";
   try {
@@ -316,7 +295,7 @@ app.get("/api/tasks", async (req, res) => {
 });
 
 app.post("/api/tasks", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   const { type, content, details, deadline } = req.body || {};
   if (!content) return res.status(400).json({ ok: false, error: "内容が空です" });
@@ -336,7 +315,7 @@ app.post("/api/tasks", async (req, res) => {
 });
 
 app.post("/api/tasks/:id/done", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
     await db.setTaskStatus(Number(req.params.id), req.body?.status === "pending" ? "pending" : "done");
@@ -347,7 +326,7 @@ app.post("/api/tasks/:id/done", async (req, res) => {
 });
 
 app.delete("/api/tasks/:id", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
     await db.deleteTask(Number(req.params.id));
@@ -373,7 +352,7 @@ function normalizeDeadlineInput(s) {
 // =====================================================================
 
 app.get("/api/summary/:day", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   const day = req.params.day === "today" ? gemini.localDate() : req.params.day;
   try {
@@ -386,7 +365,7 @@ app.get("/api/summary/:day", async (req, res) => {
 
 // その日の要約をいま生成し直す。
 app.post("/api/summary/:day/generate", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   if (!gemini.isConfigured()) return res.status(503).json({ ok: false, error: "Gemini が未設定です" });
   const day = req.params.day === "today" ? gemini.localDate() : req.params.day;
@@ -399,7 +378,7 @@ app.post("/api/summary/:day/generate", async (req, res) => {
 });
 
 app.get("/api/summaries", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
     const rows = await db.listDailySummaries(account.email, 30);
@@ -415,7 +394,7 @@ app.get("/api/summaries", async (req, res) => {
 
 // 未取得の通知を返す。アプリはこれをポーリングしてローカル通知を出す。
 app.get("/api/reminders", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
     const items = await db.pendingNotifications(account.email);
@@ -427,7 +406,7 @@ app.get("/api/reminders", async (req, res) => {
 
 // 表示済みにする。
 app.post("/api/reminders/ack", async (req, res) => {
-  const account = authFromReq(req);
+  const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
     await db.ackNotifications(account.email, req.body?.ids || []);
@@ -703,13 +682,24 @@ function renderDashboard(tableRows) {
       </section>
 
       <section class="card panel" data-panel="tasks">
-        <h2>⏰ 締切が近い課題・予定</h2>
+        <h2>⏰ 課題・予定</h2>
+        <div class="row" style="margin-bottom:.6rem">
+          <label class="muted">表示:</label>
+          <select id="taskFilter" onchange="renderTasks()">
+            <option value="pending">未完了のみ</option>
+            <option value="all">すべて</option>
+            <option value="kadai">課題のみ</option>
+            <option value="yotei">予定のみ</option>
+            <option value="overdue">期限切れ</option>
+          </select>
+          <button class="ghost small" onclick="loadTasks()">更新</button>
+        </div>
         <div id="tasks"><p class="muted">読み込み中…</p></div>
         <details style="margin-top:.6rem">
           <summary class="muted">手動で追加</summary>
           <div class="grid2" style="margin-top:.5rem">
             <select id="t_type"><option value="kadai">課題</option><option value="yotei">予定</option></select>
-            <input id="t_deadline" placeholder="期限 2026-07-05 17:00（任意）">
+            <input id="t_deadline" type="datetime-local">
           </div>
           <input id="t_content" placeholder="内容" style="margin-top:.5rem">
           <input id="t_details" placeholder="詳細（任意）" style="margin-top:.5rem">
@@ -845,16 +835,26 @@ function renderDashboard(tableRows) {
     }
 
     // ---- タスク ----
+    let allTasks = [];
+    // deadline_at ("YYYY-MM-DD HH:MM:SS" 等) を Date に。不正なら null。
+    function parseDeadline(s){
+      if(!s) return null;
+      const d = new Date(String(s).replace(' ','T'));
+      return isNaN(d.getTime()) ? null : d;
+    }
     function dueClass(at){
-      if(!at) return '';
-      const ms = new Date(at.replace(' ','T')) - new Date();
-      if(ms < 0) return 'soon'; if(ms < 3600e3) return 'soon'; if(ms < 86400e3) return 'warn'; return '';
+      const d = parseDeadline(at); if(!d) return '';
+      const ms = d - new Date();
+      if(ms < 3600e3) return 'soon';
+      if(ms < 86400e3) return 'warn';
+      return '';
     }
     function dueText(t){
-      if(!t.deadline_at) return '期限未定';
-      const s = t.deadline_at; const base = t.date_only ? s.slice(0,10) : s.slice(0,16);
-      const ms = new Date(s.replace(' ','T')) - new Date();
-      let rel = '';
+      const d = parseDeadline(t.deadline_at); if(!d) return '期限未定';
+      const s = t.deadline_at;
+      const base = t.date_only ? s.slice(0,10) : s.slice(0,16);
+      const ms = d - new Date();
+      let rel;
       if(ms < 0) rel = '（期限切れ）';
       else { const h = Math.floor(ms/3600e3);
         rel = h < 24 ? '（あと'+h+'時間）' : '（あと'+Math.floor(h/24)+'日）'; }
@@ -863,15 +863,29 @@ function renderDashboard(tableRows) {
     async function loadTasks(){
       if(!auth.email) return;
       const r = await fetch('/api/tasks?done=1',{headers:headers()});
-      const j = await r.json(); if(!j.ok){ $('tasks').innerHTML='<p class="muted">'+j.error+'</p>'; return; }
-      if(!j.tasks.length){ $('tasks').innerHTML='<p class="muted">課題・予定はありません。</p>'; return; }
-      $('tasks').innerHTML = j.tasks.map(t => {
+      const j = await r.json();
+      if(!j.ok){ $('tasks').innerHTML='<p class="muted">'+escapeHtml(j.error||'取得に失敗しました')+'</p>'; return; }
+      allTasks = Array.isArray(j.tasks) ? j.tasks : [];
+      renderTasks();
+    }
+    // 絞り込み（未完了/すべて/課題/予定/期限切れ）。並びはサーバー側で締切昇順。
+    function renderTasks(){
+      const f = ($('taskFilter')||{}).value || 'pending';
+      const now = new Date();
+      let list = allTasks.slice();
+      if(f==='pending') list = list.filter(t => t.status!=='done');
+      else if(f==='kadai') list = list.filter(t => t.type==='kadai');
+      else if(f==='yotei') list = list.filter(t => t.type==='yotei');
+      else if(f==='overdue') list = list.filter(t => { const d=parseDeadline(t.deadline_at); return d && d<now && t.status!=='done'; });
+      if(!list.length){ $('tasks').innerHTML='<p class="muted">該当する項目はありません。</p>'; return; }
+      $('tasks').innerHTML = list.map(t => {
         const done = t.status==='done';
+        const label = t.type==='yotei' ? '予定' : '課題';
         return '<div class="task">'+
           '<input type="checkbox" '+(done?'checked':'')+' onchange="toggle('+t.id+',this.checked)">'+
-          '<div class="body"><span class="badge '+t.type+'">'+(t.type==='yotei'?'予定':'課題')+'</span> '+
+          '<div class="body"><span class="badge '+(t.type==='yotei'?'yotei':'kadai')+'">'+label+'</span> '+
           '<span class="'+(done?'done':'')+'">'+escapeHtml(t.content)+'</span>'+
-          '<div class="due '+dueClass(t.deadline_at)+'">'+dueText(t)+'</div>'+
+          '<div class="due '+dueClass(t.deadline_at)+'">'+escapeHtml(dueText(t))+'</div>'+
           (t.details?'<div class="muted">'+escapeHtml(t.details)+'</div>':'')+'</div>'+
           '<button class="ghost small" onclick="delTask('+t.id+')">削除</button></div>';
       }).join('');
@@ -885,7 +899,7 @@ function renderDashboard(tableRows) {
     }
     async function addTask(){
       const body = { type:$('t_type').value, content:$('t_content').value.trim(),
-        details:$('t_details').value.trim(), deadline:$('t_deadline').value.trim() };
+        details:$('t_details').value.trim(), deadline:$('t_deadline').value };
       if(!body.content) return;
       await fetch('/api/tasks',{method:'POST',headers:headers(),body:JSON.stringify(body)});
       $('t_content').value=$('t_details').value=$('t_deadline').value=''; loadTasks();
