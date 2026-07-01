@@ -16,6 +16,23 @@
 
 ## セットアップ
 
+### Ubuntu Server なら Makefile で一発
+
+```bash
+cd server
+make install       # Node.js + MySQL 導入 → DB/専用ユーザー作成 → schema 適用 → npm ci (sudo 使用)
+make run           # http://localhost:3000
+
+# パスワード等は変数で上書き可
+make install DB_PASSWORD=好きなパスワード
+make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
+```
+
+`make install` は Node が接続する専用ユーザー（既定 `moneybot`/`moneybot`）を作成し、
+`make run` はその認証情報を環境変数で Node に渡す。`make help` で全ターゲットを表示。
+
+### 手動で行う場合
+
 ```bash
 cd server
 npm install

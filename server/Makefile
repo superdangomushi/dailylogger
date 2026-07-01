@@ -1,58 +1,74 @@
 # moneybot サーバー (Node.js + Express + MySQL) 用 Makefile
 # 想定環境: Ubuntu Server
 #
-#   make install   … サーバーの依存関係(npm パッケージ)をインストール
+#   make install   … これ1つで全部: Node.js + MySQL 導入 → DB/ユーザー作成 → npm 依存導入
+#                     (apt / mysql 設定に sudo を使う)
 #   make run       … サーバーを起動
 #
-# 初回セットアップ用の補助ターゲット:
-#   make system-deps … Ubuntu に Node.js + MySQL を導入 (要 sudo)
-#   make db          … データベース作成 + schema.sql 適用
+# 個別に実行したい場合:
+#   make system-deps … Node.js + MySQL を apt で導入し MySQL を起動 (要 sudo)
+#   make db          … データベース・専用ユーザー作成 + schema.sql 適用 (要 sudo)
+#   make npm-deps    … npm 依存関係のみインストール
 #
-# DB 接続やキーは環境変数で渡す (README 参照)。例:
-#   make run DB_USER=root DB_PASSWORD=secret GEMINI_API_KEY=xxx
+# DB 認証やキーは変数/環境変数で上書き可。例:
+#   make install DB_PASSWORD=好きなパスワード
+#   make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
 
 # ---- 設定 (make VAR=値 で上書き可) ----
-NODE_MAJOR ?= 20
-DB_HOST    ?= localhost
-DB_PORT    ?= 3306
-DB_USER    ?= root
-DB_NAME    ?= moneybot
-# パスワードは既定で空。設定時は make ... DB_PASSWORD=xxx
-DB_PASSWORD ?=
+NODE_MAJOR  ?= 20
+DB_HOST     ?= 127.0.0.1
+DB_PORT     ?= 3306
+DB_NAME     ?= moneybot
+# サーバー(Node)が接続する専用ユーザー。fresh install の root は auth_socket で
+# TCP 接続できないため、パスワード付きの専用ユーザーを作成して使う。
+DB_USER     ?= moneybot
+DB_PASSWORD ?= moneybot
 
-# DB_PASSWORD が空でなければ mysql に -p<パスワード> を渡す
-MYSQL_PWFLAG := $(if $(DB_PASSWORD),-p$(DB_PASSWORD),)
-MYSQL := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) $(MYSQL_PWFLAG)
+# これらは Node サーバー(process.env)と mysql クライアント双方へ渡す。
+export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 
 .DEFAULT_GOAL := help
-.PHONY: help install run system-deps db clean
+.PHONY: help install system-deps db npm-deps run clean
 
 help: ## 使い方を表示
 	@echo "moneybot サーバー Makefile"
 	@echo ""
-	@echo "  make install       npm 依存関係をインストール"
-	@echo "  make run           サーバーを起動 (既定 http://localhost:3000)"
-	@echo "  make system-deps   Ubuntu に Node.js $(NODE_MAJOR).x と MySQL を導入 (要 sudo)"
-	@echo "  make db            データベース($(DB_NAME))作成 + schema.sql 適用"
+	@echo "  make install       Node.js+MySQL 導入 → DB作成 → npm 依存導入 (sudo 使用)"
+	@echo "  make run           サーバーを起動 (既定 http://localhost:$${PORT:-3000})"
+	@echo "  make system-deps   Node.js $(NODE_MAJOR).x と MySQL を導入・起動 (要 sudo)"
+	@echo "  make db            DB($(DB_NAME))・ユーザー($(DB_USER))作成 + schema 適用 (要 sudo)"
+	@echo "  make npm-deps      npm 依存関係のみインストール"
 	@echo "  make clean         node_modules を削除"
 
-install: ## npm 依存関係をインストール (package-lock.json に厳密一致)
-	npm ci
+# ワンショット・セットアップ。前提ターゲットは記載順に実行される。
+install: system-deps db npm-deps ## これ1つでサーバーを動かせる状態にする
+	@echo ""
+	@echo "✅ セットアップ完了。'make run' で起動できます。"
+	@echo "   DB: $(DB_USER)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
 
-run: ## サーバーを起動
-	npm start
-
-system-deps: ## Ubuntu に Node.js + MySQL を導入 (要 sudo)
+system-deps: ## Node.js + MySQL を導入し MySQL を起動 (要 sudo)
 	@echo ">> Node.js $(NODE_MAJOR).x (NodeSource) と MySQL Server を導入します"
 	curl -fsSL https://deb.nodesource.com/setup_$(NODE_MAJOR).x | sudo -E bash -
 	sudo apt-get install -y nodejs mysql-server
+	sudo systemctl enable --now mysql
 	@echo ">> Node: $$(node -v) / npm: $$(npm -v)"
 
-db: ## データベース作成 + schema.sql 適用
-	@echo ">> データベース $(DB_NAME) を作成し schema.sql を適用します"
-	$(MYSQL) -e "CREATE DATABASE IF NOT EXISTS \`$(DB_NAME)\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-	$(MYSQL) $(DB_NAME) < schema.sql
-	@echo ">> 完了"
+db: ## DB・専用ユーザーを作成し schema.sql を適用 (要 sudo)
+	@echo ">> DB '$(DB_NAME)' と ユーザー '$(DB_USER)' を作成し schema.sql を適用します"
+	# 管理者はソケット認証(sudo mysql)で接続。識別子はシンプル名、文字列は "..." (既定は非ANSI_QUOTES)。
+	sudo mysql -e 'CREATE DATABASE IF NOT EXISTS $(DB_NAME) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; \
+	  CREATE USER IF NOT EXISTS "$(DB_USER)"@"localhost" IDENTIFIED BY "$(DB_PASSWORD)"; \
+	  ALTER USER "$(DB_USER)"@"localhost" IDENTIFIED BY "$(DB_PASSWORD)"; \
+	  GRANT ALL PRIVILEGES ON $(DB_NAME).* TO "$(DB_USER)"@"localhost"; \
+	  FLUSH PRIVILEGES;'
+	sudo mysql $(DB_NAME) < schema.sql
+	@echo ">> DB 準備完了"
+
+npm-deps: ## npm 依存関係をインストール (package-lock.json に厳密一致)
+	npm ci
+
+run: ## サーバーを起動 (DB 認証情報は上の変数から環境変数で渡る)
+	npm start
 
 clean: ## node_modules を削除
 	rm -rf node_modules
