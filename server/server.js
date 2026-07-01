@@ -11,6 +11,7 @@
 const express = require("express");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const db = require("./db");
 const gemini = require("./gemini");
 const line = require("./line");
@@ -19,6 +20,8 @@ const reminders = require("./reminders");
 
 const PORT = process.env.PORT || 3000;
 const ACCOUNTS_FILE = path.join(__dirname, "accounts.json");
+// Web から自己登録したユーザー（メール＋パスワード）を保存するファイル。
+const USERS_FILE = path.join(__dirname, "users.json");
 // 日次サマリの送信時刻（サーバーのローカル時刻）。"HH:MM" 形式。既定 21:00。
 const SUMMARY_TIME = process.env.DAILY_SUMMARY_TIME || "21:00";
 
@@ -37,9 +40,50 @@ function loadAccounts() {
   }
 }
 
+// ---- 自己登録ユーザー (users.json) ----
+function loadUsers() {
+  try {
+    return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+  } catch {
+    return []; // ファイルが無ければ空
+  }
+}
+
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+
+function hashPassword(password, salt = crypto.randomBytes(16).toString("hex")) {
+  const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  return { salt, hash };
+}
+
+function verifyPassword(password, salt, expected) {
+  const h = crypto.scryptSync(String(password), salt, 64).toString("hex");
+  const a = Buffer.from(h);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function genToken() {
+  return crypto.randomBytes(24).toString("hex");
+}
+
+// email + password でユーザーを照合し、成功したらアカウント相当を返す。
+function findUserByPassword(email, password) {
+  if (!email || !password) return null;
+  const u = loadUsers().find((x) => x.email === email);
+  if (!u || !verifyPassword(password, u.salt, u.hash)) return null;
+  return { email: u.email, token: u.token, lineUserId: u.lineUserId || "" };
+}
+
 function findAccount(email, token) {
   if (!email || !token) return null;
-  return loadAccounts().find((a) => a.email === email && a.token === token) || null;
+  const acc = loadAccounts().find((a) => a.email === email && a.token === token);
+  if (acc) return acc;
+  // accounts.json に無ければ自己登録ユーザーのトークンも照合する。
+  const u = loadUsers().find((x) => x.email === email && x.token === token);
+  return u ? { email: u.email, token: u.token, lineUserId: u.lineUserId || "" } : null;
 }
 
 // email から LINE の送信先 userId を引く（リマインドエンジンが使う）。
@@ -70,14 +114,47 @@ function authFromReq(req) {
 // 認証・アップロード
 // =====================================================================
 
-// アプリのアップロード前にトークン＋アカウントの整合を確認するためのログイン。
+// 新規ユーザー登録（Web 用）。メール＋パスワードで登録し、API 用トークンを発行する。
+app.post("/api/register", (req, res) => {
+  const email = String(req.body?.email || "").trim();
+  const password = String(req.body?.password || "");
+  if (!email || !password) {
+    return res.status(400).json({ ok: false, error: "メールとパスワードを入力してください" });
+  }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ ok: false, error: "メールアドレスの形式が不正です" });
+  }
+  if (password.length < 6) {
+    return res.status(400).json({ ok: false, error: "パスワードは6文字以上にしてください" });
+  }
+  // 既存（accounts.json / users.json）と重複しないこと。
+  if (loadAccounts().some((a) => a.email === email) ||
+      loadUsers().some((u) => u.email === email)) {
+    return res.status(409).json({ ok: false, error: "このメールは既に登録されています" });
+  }
+  const { salt, hash } = hashPassword(password);
+  const token = genToken();
+  const users = loadUsers();
+  users.push({ email, salt, hash, token, createdAt: new Date().toISOString() });
+  try {
+    saveUsers(users);
+  } catch (e) {
+    console.error("users.json 保存に失敗:", e.message);
+    return res.status(500).json({ ok: false, error: "登録の保存に失敗しました" });
+  }
+  console.log(`ユーザー登録: ${email}`);
+  res.json({ ok: true, email, token });
+});
+
+// ログイン。Web はメール＋パスワード、アプリはメール＋トークンで照合する。
+// いずれも成功時は API 用トークンを返す（Web はこれを保存して以降の API に使う）。
 app.post("/api/login", (req, res) => {
-  const { email, token } = req.body || {};
-  const account = findAccount(email, token);
+  const { email, token, password } = req.body || {};
+  const account = password ? findUserByPassword(email, password) : findAccount(email, token);
   if (!account) {
     return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
   }
-  res.json({ ok: true, email: account.email, line: Boolean(account.lineUserId) });
+  res.json({ ok: true, email: account.email, token: account.token, line: Boolean(account.lineUserId) });
 });
 
 // 文字起こしテキストの受信 → MySQL に保存 → Gemini で課題/予定/要約を抽出。
@@ -397,7 +474,8 @@ app.get("/", async (_req, res) => {
           <td>${escapeHtml(r.filename)}</td>
           <td class="num">${r.chars}</td>
           <td>${new Date(r.updated_at).toLocaleString("ja-JP")}</td>
-          <td><a class="dl" href="/download/${r.id}">DL</a></td>
+          <td><button class="small" onclick="viewText(${r.id})">本文</button>
+              <a class="dl" href="/download/${r.id}">DL</a></td>
           <td>${csvLinks}</td>
         </tr>`;
         })
@@ -405,6 +483,17 @@ app.get("/", async (_req, res) => {
     : `<tr><td colspan="6" class="empty">まだファイルがありません。</td></tr>`;
 
   res.type("text/html").send(renderDashboard(tableRows));
+});
+
+// ブラウザ内で本文を確認するための JSON 取得（ダッシュボードのモーダル用）。
+app.get("/api/transcript/:id", async (req, res) => {
+  try {
+    const row = await db.getTranscript(req.params.id);
+    if (!row) return res.status(404).json({ ok: false, error: "見つかりません" });
+    res.json({ ok: true, filename: row.filename, content: row.content, summary: row.summary || "" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.get("/download/:id", async (req, res) => {
@@ -519,6 +608,12 @@ function renderDashboard(tableRows) {
     .bubble.me { align-self:flex-end; background:var(--accent); color:#fff; }
     .bubble.bot { align-self:flex-start; background:#eef2f7; }
     .done { text-decoration: line-through; color:#94a3b8; }
+    .modalbg { position:fixed; inset:0; background:rgba(15,23,42,.55); display:flex;
+               align-items:center; justify-content:center; padding:1rem; z-index:50; }
+    .modalbox { background:#fff; border-radius:12px; padding:1rem 1.1rem; width:min(760px,100%);
+                max-height:85vh; display:flex; flex-direction:column; }
+    .modalpre { white-space:pre-wrap; word-break:break-word; overflow:auto; margin:.6rem 0 0;
+                font-size:.9rem; line-height:1.5; }
   </style>
 </head>
 <body>
@@ -527,15 +622,26 @@ function renderDashboard(tableRows) {
     <p>常時録音から課題・予定を拾い、締切前に LINE で警告。聞けば答え、頼めば登録します。</p>
   </header>
   <main>
-    <section class="card">
-      <h2>ログイン情報</h2>
+    <section class="card" id="authCard">
+      <h2>ログイン / 新規登録</h2>
       <div class="grid2">
-        <input id="email" placeholder="アカウント(メール)">
-        <input id="token" placeholder="トークン" type="password">
+        <input id="email" placeholder="メールアドレス" autocomplete="username">
+        <input id="password" placeholder="パスワード(6文字以上)" type="password" autocomplete="current-password"
+               onkeydown="if(event.key==='Enter')login()">
       </div>
       <div class="row" style="margin-top:.5rem">
-        <button onclick="saveAuth()">保存して読み込み</button>
+        <button onclick="login()">ログイン</button>
+        <button class="ghost" onclick="register()">新規登録</button>
         <span id="authState" class="muted"></span>
+      </div>
+      <p class="muted">初めての方は「新規登録」。以降はメールとパスワードでログインできます。</p>
+    </section>
+
+    <div id="app" style="display:none">
+    <section class="card">
+      <div class="row" style="justify-content:space-between">
+        <span id="whoami" class="muted"></span>
+        <button class="ghost small" onclick="logout()">ログアウト</button>
       </div>
     </section>
 
@@ -578,7 +684,18 @@ function renderDashboard(tableRows) {
         <tbody>${tableRows}</tbody>
       </table>
     </section>
+    </div><!-- /#app -->
   </main>
+
+  <div id="modal" class="modalbg" style="display:none" onclick="if(event.target===this)closeModal()">
+    <div class="modalbox">
+      <div class="row" style="justify-content:space-between">
+        <strong id="modalTitle"></strong>
+        <button class="ghost small" onclick="closeModal()">閉じる</button>
+      </div>
+      <pre id="modalBody" class="modalpre"></pre>
+    </div>
+  </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -587,18 +704,53 @@ function renderDashboard(tableRows) {
       'X-Account-Email': auth.email||'', 'Authorization':'Bearer '+(auth.token||'') }; }
 
     function initAuth(){
-      if(auth.email){ $('email').value = auth.email; $('token').value = auth.token||''; loadAll(); }
+      if(auth.email && auth.token){ $('email').value = auth.email; onAuthed(); }
     }
-    async function saveAuth(){
-      auth = { email: $('email').value.trim(), token: $('token').value.trim() };
-      localStorage.setItem('mb_auth', JSON.stringify(auth));
+    function onAuthed(){
+      $('app').style.display = '';
+      $('whoami').textContent = 'ログイン中: ' + (auth.email||'');
+      $('authState').textContent = '✓ ' + (auth.email||'');
+      loadAll();
+    }
+    async function login(){
+      const email = $('email').value.trim(), password = $('password').value;
+      if(!email || !password){ $('authState').textContent='メールとパスワードを入力'; return; }
       const r = await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(auth)});
+        body: JSON.stringify({email, password})});
       const j = await r.json();
-      $('authState').textContent = j.ok ? ('✓ '+j.email+(j.line?'（LINE連携あり）':'（LINE未連携）')) : ('✗ '+(j.error||'失敗'));
-      if(j.ok) loadAll();
+      if(j.ok){ auth = {email:j.email, token:j.token}; localStorage.setItem('mb_auth', JSON.stringify(auth)); onAuthed(); }
+      else $('authState').textContent = '✗ ' + (j.error||'ログイン失敗');
+    }
+    async function register(){
+      const email = $('email').value.trim(), password = $('password').value;
+      if(!email || !password){ $('authState').textContent='メールとパスワードを入力'; return; }
+      const r = await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({email, password})});
+      const j = await r.json();
+      if(j.ok){ auth = {email:j.email, token:j.token}; localStorage.setItem('mb_auth', JSON.stringify(auth));
+        $('authState').textContent='✓ 登録しました'; onAuthed(); }
+      else $('authState').textContent = '✗ ' + (j.error||'登録失敗');
+    }
+    function logout(){
+      auth = {}; localStorage.removeItem('mb_auth');
+      $('app').style.display = 'none'; $('password').value=''; $('authState').textContent='ログアウトしました';
     }
     function loadAll(){ loadTasks(); loadSummary(); }
+
+    // ---- 本文表示（モーダル） ----
+    async function viewText(id){
+      $('modalTitle').textContent = '読み込み中…'; $('modalBody').textContent = '';
+      $('modal').style.display = 'flex';
+      try {
+        const r = await fetch('/api/transcript/'+id, {headers: headers()});
+        const j = await r.json();
+        if(j.ok){
+          $('modalTitle').textContent = j.filename;
+          $('modalBody').textContent = (j.summary ? '【要約】\\n'+j.summary+'\\n\\n【本文】\\n' : '') + j.content;
+        } else { $('modalTitle').textContent = 'エラー'; $('modalBody').textContent = j.error||''; }
+      } catch(e){ $('modalTitle').textContent='通信エラー'; }
+    }
+    function closeModal(){ $('modal').style.display = 'none'; }
 
     // ---- チャット ----
     function bubble(text, who){
