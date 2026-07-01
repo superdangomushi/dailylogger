@@ -25,7 +25,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class BackgroundSync(private val context: Context) {
 
     private val accountStore = AccountStore(context)
-    private val client = MoneybotClient()
+    private val client = AiHelperClient()
     private val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private val lock = Object()
@@ -41,7 +41,7 @@ class BackgroundSync(private val context: Context) {
     fun start() {
         if (running.getAndSet(true)) return
         ensureChannel()
-        thread = Thread({ loop() }, "moneybot-sync").also { it.start() }
+        thread = Thread({ loop() }, "AIHelper-sync").also { it.start() }
         Log.i(TAG, "background sync started")
     }
 
@@ -107,11 +107,11 @@ class BackgroundSync(private val context: Context) {
         for (file in transcriptFiles().sortedBy { it.name }) {
             if (file.name == skip || file.name in sent) continue
             when (client.upload(accountStore.baseUrl, accountStore.email, accountStore.token, file)) {
-                is MoneybotClient.Result.Ok -> {
+                is AiHelperClient.Result.Ok -> {
                     sent.add(file.name)
                     uploaded++
                 }
-                is MoneybotClient.Result.Error -> { /* 次のパスで再送される */ }
+                is AiHelperClient.Result.Error -> { /* 次のパスで再送される */ }
             }
         }
         if (uploaded > 0) {
@@ -130,49 +130,15 @@ class BackgroundSync(private val context: Context) {
 
     /** サーバーの未読リマインドをローカル通知として表示し、既読化する。 */
     private fun pollReminders() {
-        val reminders = client.fetchReminders(accountStore.baseUrl, accountStore.email, accountStore.token)
-        if (reminders.isEmpty()) return
-        val nm = context.getSystemService(NotificationManager::class.java)
-        val acked = ArrayList<Long>(reminders.size)
-        for (r in reminders) {
-            nm.notify(NOTIF_BASE + (r.id % 100000).toInt(), buildReminderNotification(r.message))
-            acked.add(r.id)
-        }
-        client.ackReminders(accountStore.baseUrl, accountStore.email, accountStore.token, acked)
-        Log.i(TAG, "showed ${reminders.size} reminder notification(s)")
-    }
-
-    private fun buildReminderNotification(message: String): android.app.Notification {
-        val contentIntent = PendingIntent.getActivity(
-            context, 0,
-            Intent(context, MainActivity::class.java),
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val title = message.lineSequence().firstOrNull()?.take(40) ?: "リマインド"
-        return NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder)
-            .setContentTitle(title)
-            .setContentText(message)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
-            .setContentIntent(contentIntent)
-            .setAutoCancel(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        ReminderNotifier.poll(context)
     }
 
     private fun ensureChannel() {
-        val nm = context.getSystemService(NotificationManager::class.java)
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "締切・予定リマインド",
-            NotificationManager.IMPORTANCE_HIGH
-        ).apply { description = "課題や予定の締切が近いときの通知" }
-        nm.createNotificationChannel(channel)
+        ReminderNotifier.ensureChannel(context)
     }
 
     companion object {
         private const val TAG = "BackgroundSync"
-        private const val CHANNEL_ID = "reminders"
         private const val PREFS = "sync_prefs"
         private const val KEY_SENT = "sent_files"
         private const val NOTIF_BASE = 2000

@@ -1,4 +1,4 @@
-# moneybot.jp サーバー兼ウェブアプリ (Node.js + Express + MySQL)
+# AIHelper.jp サーバー兼ウェブアプリ (Node.js + Express + MySQL)
 
 文字起こしアプリから送られてくるテキストを受け取り **MySQL に保存**し、
 **Gemini** で「課題」「予定」「要約」を抽出する。締切が近づくと **LINE** と
@@ -28,7 +28,7 @@ make install DB_PASSWORD=好きなパスワード
 make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
 ```
 
-`make install` は Node が接続する専用ユーザー（既定 `moneybot`/`moneybot`）を作成し、
+`make install` は Node が接続する専用ユーザー（既定 `aihelper`/`aihelper`）を作成し、
 `make run` はその認証情報を環境変数で Node に渡す。`make help` で全ターゲットを表示。
 
 ### 手動で行う場合
@@ -37,7 +37,7 @@ make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
 cd server
 npm install
 
-# DB を用意（schema.sql で moneybot DB と各テーブルを作成）
+# DB を用意（schema.sql で AIHelper DB と各テーブルを作成）
 mysql -u root < schema.sql
 
 # 起動
@@ -52,7 +52,7 @@ npm start          # http://localhost:3000
 | `DB_PORT` | `3306` | ポート |
 | `DB_USER` | `root` | ユーザー |
 | `DB_PASSWORD` | （空） | パスワード |
-| `DB_NAME` | `moneybot` | データベース名 |
+| `DB_NAME` | `AIHelper` | データベース名 |
 | `PORT` | `3000` | サーバーの待受ポート |
 | `GEMINI_API_KEY` | （空） | Gemini の API キー。未設定なら抽出・要約・秘書チャットは無効 |
 | `GEMINI_MODEL` | `gemini-2.5-flash` | 使用する Gemini モデル |
@@ -79,7 +79,7 @@ npm start
 ```json
 [
   {
-    "email": "demo@moneybot.jp",
+    "email": "demo@AIHelper.jp",
     "token": "demo-token-1234567890",
     "lineUserId": "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   }
@@ -128,7 +128,7 @@ npm start
 ### POST /api/upload
 ```
 Authorization: Bearer demo-token-1234567890
-X-Account-Email: demo@moneybot.jp
+X-Account-Email: demo@AIHelper.jp
 X-Filename: 2026-06-14_15.txt
 Content-Type: text/plain
 
@@ -139,7 +139,7 @@ Content-Type: text/plain
 ```bash
 curl -X POST http://localhost:3000/api/ask \
   -H 'Content-Type: application/json' \
-  -d '{"email":"demo@moneybot.jp","token":"demo-token-1234567890",
+  -d '{"email":"demo@AIHelper.jp","token":"demo-token-1234567890",
        "question":"来週月曜10時にゼミの予定入れといて"}'
 # → { ok:true, reply:"了解です。来週月曜10時にゼミを登録しました。", applied:[{op:"add_task",...}] }
 ```
@@ -163,7 +163,7 @@ curl -X POST http://localhost:3000/api/ask \
 # 文字起こしを送る（Gemini 設定時は課題/予定/要約も付く）
 curl -X POST http://localhost:3000/api/upload \
   -H 'Authorization: Bearer demo-token-1234567890' \
-  -H 'X-Account-Email: demo@moneybot.jp' \
+  -H 'X-Account-Email: demo@AIHelper.jp' \
   -H 'X-Filename: 2026-07-01_15.txt' \
   -H 'Content-Type: text/plain' \
   --data-binary '来週月曜までにレポート提出。水曜15時から研究会議です。'

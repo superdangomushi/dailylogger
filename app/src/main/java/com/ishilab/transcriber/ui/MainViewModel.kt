@@ -6,7 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.ishilab.transcriber.model.ModelManager
 import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.net.AccountStore
-import com.ishilab.transcriber.net.MoneybotClient
+import com.ishilab.transcriber.net.AiHelperClient
+import com.ishilab.transcriber.google.CalendarEvent
+import com.ishilab.transcriber.google.GoogleCalendarClient
+import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -20,10 +23,10 @@ data class TranscriptItem(val name: String, val path: String, val sizeBytes: Lon
 /** 秘書チャットの1メッセージ。fromUser=true なら利用者の発話。 */
 data class ChatMessage(val text: String, val fromUser: Boolean)
 
-/** moneybot.jp のログイン状態。 */
+/** AIHelper.jp のログイン状態。 */
 data class AccountState(
     val loggedIn: Boolean = false,
-    val baseUrl: String = "https://moneybot.jp",
+    val baseUrl: String = "https://AIHelper.jp",
     val email: String = "",
 )
 
@@ -42,22 +45,28 @@ data class UiState(
     val sendMessage: String? = null,
     val chatLog: List<ChatMessage> = emptyList(),
     val askInProgress: Boolean = false,
-    val tasks: List<MoneybotClient.Task> = emptyList(),
+    val tasks: List<AiHelperClient.Task> = emptyList(),
     val tasksLoading: Boolean = false,
     val tasksError: String? = null,
     val showDoneTasks: Boolean = false,
     val summary: String? = null,
     val summaryLoading: Boolean = false,
     val summaryError: String? = null,
+    // Google カレンダー連携
+    val googleEmail: String? = null,
+    val calendarEvents: List<CalendarEvent> = emptyList(),
+    val googleBusy: Boolean = false,
+    val googleMessage: String? = null,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
+    val googleConnected: Boolean get() = googleEmail != null
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val modelManager = ModelManager(app)
     private val accountStore = AccountStore(app)
-    private val moneybot = MoneybotClient()
+    private val AIHelper = AiHelperClient()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
@@ -112,7 +121,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** moneybot.jp にログイン（メール＋パスワード）。成功するとトークンを受け取り保存する。 */
+    /** AIHelper.jp にログイン（メール＋パスワード）。成功するとトークンを受け取り保存する。 */
     fun login(baseUrl: String, email: String, password: String) =
         authenticate(baseUrl, email, password, register = false)
 
@@ -131,7 +140,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(loginInProgress = true, loginError = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                if (register) moneybot.register(url, mail, password) else moneybot.login(url, mail, password)
+                if (register) AIHelper.register(url, mail, password) else AIHelper.login(url, mail, password)
             }
             result.fold(
                 onSuccess = { token ->
@@ -168,7 +177,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(summaryLoading = true, summaryError = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.fetchSummary(accountStore.baseUrl, accountStore.email, accountStore.token)
+                AIHelper.fetchSummary(accountStore.baseUrl, accountStore.email, accountStore.token)
             }
             result.fold(
                 onSuccess = { s -> _ui.update { it.copy(summary = s, summaryLoading = false) } },
@@ -187,7 +196,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(summaryLoading = true, summaryError = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.generateSummary(accountStore.baseUrl, accountStore.email, accountStore.token)
+                AIHelper.generateSummary(accountStore.baseUrl, accountStore.email, accountStore.token)
             }
             result.fold(
                 onSuccess = { s -> _ui.update { it.copy(summary = s, summaryLoading = false) } },
@@ -206,7 +215,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(tasksLoading = true, tasksError = null, showDoneTasks = includeDone) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.fetchTasks(
+                AIHelper.fetchTasks(
                     accountStore.baseUrl, accountStore.email, accountStore.token, includeDone
                 )
             }
@@ -222,43 +231,43 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 課題・予定の完了/未完了を切り替え、成功したら一覧を更新する。 */
-    fun toggleTaskDone(task: MoneybotClient.Task) {
+    fun toggleTaskDone(task: AiHelperClient.Task) {
         if (!accountStore.loggedIn) return
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.setTaskDone(
+                AIHelper.setTaskDone(
                     accountStore.baseUrl, accountStore.email, accountStore.token,
                     task.id, !task.done
                 )
             }
             when (result) {
-                is MoneybotClient.Result.Ok -> loadTasks()
-                is MoneybotClient.Result.Error ->
+                is AiHelperClient.Result.Ok -> loadTasks()
+                is AiHelperClient.Result.Error ->
                     _ui.update { it.copy(tasksError = result.message) }
             }
         }
     }
 
-    /** 文字起こしファイルを moneybot.jp に送信する。ログイン中のアカウントで送る。 */
-    fun sendToMoneybot(item: TranscriptItem) {
+    /** 文字起こしファイルを AIHelper.jp に送信する。ログイン中のアカウントで送る。 */
+    fun sendToServer(item: TranscriptItem) {
         if (!accountStore.loggedIn) {
-            _ui.update { it.copy(sendMessage = "先に moneybot.jp にログインしてください") }
+            _ui.update { it.copy(sendMessage = "先に AIHelper.jp にログインしてください") }
             return
         }
         if (_ui.value.sendingFile != null) return
         _ui.update { it.copy(sendingFile = item.name, sendMessage = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.upload(
+                AIHelper.upload(
                     accountStore.baseUrl, accountStore.email, accountStore.token, File(item.path)
                 )
             }
             val message = when (result) {
-                is MoneybotClient.Result.Ok -> result.message
-                is MoneybotClient.Result.Error -> "送信失敗: ${result.message}"
+                is AiHelperClient.Result.Ok -> result.message
+                is AiHelperClient.Result.Error -> "送信失敗: ${result.message}"
             }
             _ui.update {
-                val sent = if (result is MoneybotClient.Result.Ok) it.sentFiles + item.name else it.sentFiles
+                val sent = if (result is AiHelperClient.Result.Ok) it.sentFiles + item.name else it.sentFiles
                 it.copy(sendingFile = null, sentFiles = sent, sendMessage = message)
             }
         }
@@ -276,7 +285,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (q.isEmpty() || _ui.value.askInProgress) return
         if (!accountStore.loggedIn) {
             _ui.update {
-                it.copy(chatLog = it.chatLog + ChatMessage("先に moneybot.jp にログインしてください", false))
+                it.copy(chatLog = it.chatLog + ChatMessage("先に AIHelper.jp にログインしてください", false))
             }
             return
         }
@@ -285,7 +294,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                moneybot.ask(accountStore.baseUrl, accountStore.email, accountStore.token, q)
+                AIHelper.ask(accountStore.baseUrl, accountStore.email, accountStore.token, q)
             }
             val reply = result.fold(
                 onSuccess = { it.reply.ifBlank { "（応答なし）" } },
@@ -297,6 +306,68 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             // 「予定入れといて」等でタスクが増減した可能性があるので一覧を更新。
             val applied = result.getOrNull()?.applied ?: 0
             if (applied > 0) loadTasks()
+        }
+    }
+
+    // ---- Google カレンダー連携 ----
+
+    /** サインイン済みアカウントを反映（サインイン結果後・起動時に呼ぶ）。 */
+    fun refreshGoogle() {
+        val acc = GoogleSignIn.getLastSignedInAccount(getApplication())
+        _ui.update { it.copy(googleEmail = acc?.email) }
+        if (acc != null) loadCalendar()
+    }
+
+    fun onGoogleDisconnected() {
+        _ui.update { it.copy(googleEmail = null, calendarEvents = emptyList(), googleMessage = null) }
+    }
+
+    /** 直近の予定を読み込む。 */
+    fun loadCalendar() {
+        val app = getApplication<Application>()
+        val acc = GoogleSignIn.getLastSignedInAccount(app) ?: return
+        _ui.update { it.copy(googleBusy = true, googleMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val token = GoogleCalendarClient.accessToken(app, acc)
+                    GoogleCalendarClient.listUpcomingEvents(token).getOrThrow()
+                }
+            }
+            result.fold(
+                onSuccess = { list -> _ui.update { it.copy(calendarEvents = list, googleBusy = false) } },
+                onFailure = { e ->
+                    _ui.update { it.copy(googleBusy = false, googleMessage = "カレンダー取得失敗: ${e.message}") }
+                }
+            )
+        }
+    }
+
+    /** 課題・予定の締切を Google カレンダーに登録する。 */
+    fun addTaskToCalendar(task: AiHelperClient.Task) {
+        val app = getApplication<Application>()
+        val acc = GoogleSignIn.getLastSignedInAccount(app)
+        if (acc == null) {
+            _ui.update { it.copy(googleMessage = "先に Google 連携してください") }
+            return
+        }
+        _ui.update { it.copy(googleBusy = true, googleMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val token = GoogleCalendarClient.accessToken(app, acc)
+                    GoogleCalendarClient.insertDeadline(token, task.content, task.deadline, task.dateOnly).getOrThrow()
+                }
+            }
+            result.fold(
+                onSuccess = {
+                    _ui.update { it.copy(googleBusy = false, googleMessage = "「${task.content}」をカレンダーに登録しました") }
+                    loadCalendar()
+                },
+                onFailure = { e ->
+                    _ui.update { it.copy(googleBusy = false, googleMessage = "登録失敗: ${e.message}") }
+                }
+            )
         }
     }
 

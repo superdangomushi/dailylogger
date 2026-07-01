@@ -23,6 +23,8 @@ import androidx.core.content.ContextCompat
 import com.ishilab.transcriber.MainActivity
 import com.ishilab.transcriber.R
 import com.ishilab.transcriber.audio.AudioChunker
+import com.ishilab.transcriber.audio.PcmSegment
+import com.ishilab.transcriber.audio.PcmSegmentWriter
 import com.ishilab.transcriber.net.BackgroundSync
 import com.ishilab.transcriber.model.ModelManager
 import com.ishilab.transcriber.model.WhisperModel
@@ -32,17 +34,23 @@ import com.ishilab.transcriber.transcribe.WhisperEngine
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * バックグラウンド常時録音＋ローカル文字起こしを行う foreground service。
+ * バックグラウンド録音＋ローカル文字起こしを行う foreground service。
  *
- * - 録音スレッド: AudioRecord(16kHz/mono/PCM16) を読み取り [AudioChunker] で30秒チャンク化
- * - 文字起こしワーカー: チャンクを順次 whisper で処理し [TranscriptStore] に1時間=1ファイルで追記
- * - 通知から一時停止/再開/終了を制御（一時停止中はマイクを完全解放）
+ * 文字起こしは「録音しながら」ではなく、区切りが確定した音声を**まとめて**行う:
+ * - 録音スレッド: AudioRecord(16kHz/mono/PCM16) を読み取り、PCM を **区間ファイル**へ書き出す。
+ * - 実時刻で1時間ごとに区間を締め、直前1時間ぶんの音声をワーカーがまとめて文字起こしする。
+ * - 終了ボタンが押された時点でも、その区間をまとめて文字起こしする（これらのどちらか早い方）。
+ * - 文字起こしが済んだテキストは [TranscriptStore] に保存し、即サーバー送信（失敗時は再送）。
  */
 class AudioCaptureService : Service() {
 
@@ -54,12 +62,20 @@ class AudioCaptureService : Service() {
     @Volatile private var backgroundSync: BackgroundSync? = null
     private val shutdownGuard = AtomicBoolean(false)
 
-    private val chunkQueue = LinkedBlockingQueue<FloatArray>(QUEUE_CAPACITY)
+    // 文字起こし待ちの「確定した音声区間」。録音とは非同期にワーカーが処理する。
+    private val segmentQueue = LinkedBlockingQueue<Segment>()
+    private lateinit var segmentsDir: File
+    @Volatile private var segWriter: PcmSegmentWriter? = null
+    @Volatile private var segStartMillis: Long = 0L
+    @Volatile private var segHourKey: String = ""
 
     @Volatile private var recordThread: Thread? = null
     @Volatile private var workerThread: Thread? = null
     private val recording = AtomicBoolean(false)   // マイク稼働中か
     private val serviceActive = AtomicBoolean(false) // サービス全体が生存しているか
+
+    /** 文字起こし待ち/実行対象の音声区間。 */
+    private data class Segment(val file: File, val startMillis: Long, val label: String)
 
     // 開始/一時停止/再開/終了の各処理はブロッキング(スレッドjoin等)を含むため、
     // メインスレッドをふさいで ANR を起こさないよう専用スレッドで直列実行する。
@@ -71,6 +87,7 @@ class AudioCaptureService : Service() {
         super.onCreate()
         store = TranscriptStore(filesDir)
         modelManager = ModelManager(this)
+        segmentsDir = File(filesDir, "segments").apply { mkdirs() }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$WAKE_TAG::lock")
         createChannel()
@@ -135,13 +152,15 @@ class AudioCaptureService : Service() {
         recording.set(false)
         if (wasActive) {
             accrueRecordingTime()
-            // ワーカーに終了を通知（poison pill）。キューが満杯でも確実に止めるため clear もする。
-            chunkQueue.clear()
-            chunkQueue.offer(POISON)
             recordThread?.join(3_000)
             recordThread = null
+            // 終了時: 録音済みの残り区間を確定させ、文字起こし対象に積む。
+            finalizeSegment()
+            // ワーカーに終了を通知。積んである区間は POISON より前なので必ず処理される。
+            segmentQueue.offer(POISON)
+            // 最後の区間の文字起こし＋保存が終わるまで待つ（長時間になり得るので余裕を持つ）。
             val worker = workerThread
-            worker?.join(5_000)
+            worker?.join(WORKER_JOIN_MS)
             val workerStuck = worker?.isAlive == true
             if (workerStuck) worker?.interrupt()
             workerThread = null
@@ -201,7 +220,7 @@ class AudioCaptureService : Service() {
         // 外部要因で破棄された場合の後始末。メインスレッドをブロックしないよう control で。
         if (serviceActive.getAndSet(false)) {
             recording.set(false)
-            chunkQueue.offer(POISON)
+            segmentQueue.offer(POISON)
             control.execute {
                 recordThread?.join(2_000); recordThread = null
                 workerThread?.join(2_000); workerThread = null
@@ -264,22 +283,21 @@ class AudioCaptureService : Service() {
             return
         }
 
-        val chunker = AudioChunker()
         val readBuf = ShortArray(bufferSize)
         try {
             record.startRecording()
             Log.i(TAG, "recording started")
+            ensureSegmentWriter()
             while (recording.get()) {
                 val n = record.read(readBuf, 0, readBuf.size)
                 if (n > 0) {
-                    chunker.append(readBuf, n)
-                    while (chunker.hasFullChunk()) {
-                        chunker.drainChunk()?.let { enqueue(it) }
-                    }
+                    segWriter?.append(readBuf, n)
+                    // 実時刻の「時」が変わったら、直前1時間ぶんを確定して文字起こしへ回す。
+                    val key = hourKey(System.currentTimeMillis())
+                    if (key != segHourKey) rotateSegment()
                 }
             }
-            // 一時停止/停止時の半端な残りも処理に回す
-            chunker.flushRemaining()?.let { enqueue(it) }
+            // 一時停止/停止では区間を閉じない（stop 側で finalizeSegment する）。
         } catch (e: Exception) {
             Log.e(TAG, "record loop error", e)
             pushState { it.copy(error = "録音エラー: ${e.message}") }
@@ -293,18 +311,43 @@ class AudioCaptureService : Service() {
         }
     }
 
-    /** キューが詰まっている(文字起こしが追いつかない)場合は古いチャンクを捨てて実時間を優先。 */
-    private fun enqueue(chunk: FloatArray) {
-        if (!chunkQueue.offer(chunk)) {
-            chunkQueue.poll()
-            chunkQueue.offer(chunk)
-            // 文字起こしが実時間に追いつかずキューが溢れている＝端末が過負荷。
-            pushState { it.copy(dropped = it.dropped + 1, overloaded = true) }
-            Log.w(TAG, "queue full, dropped oldest chunk")
+    /** 現在の区間ライタが無ければ作る。 */
+    private fun ensureSegmentWriter() {
+        if (segWriter != null) return
+        val now = System.currentTimeMillis()
+        segStartMillis = now
+        segHourKey = hourKey(now)
+        val f = File(segmentsDir, "seg-${now}.pcm")
+        segWriter = PcmSegmentWriter(f)
+    }
+
+    /** 実時刻の時が変わったとき: 現区間を閉じてキューに積み、新しい区間を開始する。 */
+    private fun rotateSegment() {
+        finalizeSegment()
+        ensureSegmentWriter()
+    }
+
+    /** 現区間を閉じ、十分な長さがあれば文字起こしキューへ積む。 */
+    private fun finalizeSegment() {
+        val w = segWriter ?: return
+        segWriter = null
+        w.close()
+        if (w.samples >= MIN_SEGMENT_SAMPLES) {
+            val seg = Segment(w.file, segStartMillis, hourLabel(segStartMillis))
+            segmentQueue.offer(seg)
+            pushState { it.copy(queueSize = segmentQueue.size) }
         } else {
-            pushState { it.copy(queueSize = chunkQueue.size) }
+            w.file.delete() // 短すぎる区間は破棄
         }
     }
+
+    /** 実時刻の「時」を表すキー（TranscriptStore のファイル名と揃える）。 */
+    private fun hourKey(millis: Long): String =
+        SimpleDateFormat("yyyy-MM-dd_HH", Locale.JAPAN).format(Date(millis))
+
+    /** 「7/2 14時台」のような表示用ラベル。 */
+    private fun hourLabel(millis: Long): String =
+        SimpleDateFormat("M/d H時台", Locale.JAPAN).format(Date(millis))
 
     // ---- 文字起こしワーカー -------------------------------------------------
 
@@ -327,53 +370,58 @@ class AudioCaptureService : Service() {
             return
         }
 
-        var lastHourFile: String? = null
-        while (serviceActive.get()) {
-            val chunk = try {
-                chunkQueue.take()
+        // POISON が来るまで（＝終了指示まで）は、積まれた区間を全て処理し切る。
+        while (true) {
+            val seg = try {
+                segmentQueue.take()
             } catch (_: InterruptedException) {
                 break
             }
-            if (chunk === POISON) break
-            // キューが空まで追いついたら過負荷フラグを解除。
-            pushState { it.copy(queueSize = chunkQueue.size, overloaded = if (chunkQueue.isEmpty()) false else it.overloaded) }
-
-            // 簡易VAD: ほぼ無音のチャンクは文字起こししない
-            if (AudioChunker.isSilent(chunk)) {
-                continue
-            }
-            pushState { it.copy(transcribing = true) }
-            val text = try {
-                engine?.transcribe(chunk).orEmpty()
-            } catch (e: Exception) {
-                Log.e(TAG, "transcribe error", e)
-                ""
-            } finally {
-                pushState { it.copy(transcribing = false) }
-            }
-            if (text.isNotBlank()) {
-                val now = System.currentTimeMillis()
-                store.append(text, now)
-                val fileName = store.fileFor(now).name
-                // 時刻が変わって新しいファイルになったら、直前の完了ファイルを即送信。
-                if (lastHourFile != null && lastHourFile != fileName) {
-                    backgroundSync?.triggerNow()
-                }
-                lastHourFile = fileName
-                // 現在書き込み中のファイルは未完了として送らないよう伝える。
-                backgroundSync?.setCurrentHourFile(fileName)
-                pushState {
-                    it.copy(
-                        chunksDone = it.chunksDone + 1,
-                        lastText = text,
-                        currentFile = fileName
-                    )
-                }
-                updateNotification()
-            }
-            // 文字起こし済みチャンクの音声データは保持しない（GC に任せ破棄）
+            if (seg === POISON) break
+            transcribeSegment(seg)
+            pushState { it.copy(queueSize = segmentQueue.size) }
         }
         Log.i(TAG, "worker finished")
+    }
+
+    /** 1区間(最大1時間)を30秒窓で順に文字起こしし、テキストを保存して送信をトリガする。 */
+    private fun transcribeSegment(seg: Segment) {
+        val windowSamples = AudioChunker.SAMPLE_RATE * AudioChunker.CHUNK_SECONDS
+        val totalWindows = maxOf(1, ((seg.file.length() / 2) / windowSamples + 1).toInt())
+        val sb = StringBuilder()
+        var index = 0
+        pushState { it.copy(transcribing = true, transcribeLabel = seg.label, transcribeProgress = 0f) }
+        updateNotification()
+        try {
+            PcmSegment.forEachWindow(seg.file, windowSamples) { window ->
+                if (!AudioChunker.isSilent(window)) {
+                    val part = try {
+                        engine?.transcribe(window).orEmpty()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "transcribe error", e); ""
+                    }
+                    if (part.isNotBlank()) sb.append(part).append(' ')
+                }
+                index++
+                pushState { it.copy(transcribeProgress = (index.toFloat() / totalWindows).coerceIn(0f, 1f)) }
+                // サービス終了要求が来ていても、終了区間は処理し切りたいので中断しない。
+                true
+            }
+        } finally {
+            seg.file.delete() // 音声データは保持しない
+            pushState { it.copy(transcribing = false, transcribeProgress = 0f, transcribeLabel = null) }
+        }
+
+        val text = sb.toString().trim()
+        if (text.isNotBlank()) {
+            store.append(text, seg.startMillis)
+            val fileName = store.fileFor(seg.startMillis).name
+            pushState {
+                it.copy(chunksDone = it.chunksDone + 1, lastText = text, currentFile = fileName)
+            }
+            updateNotification()
+            backgroundSync?.triggerNow() // 文字起こしできたら即送信（失敗時はリトライ）
+        }
     }
 
     // ---- 通知 ---------------------------------------------------------------
@@ -398,12 +446,18 @@ class AudioCaptureService : Service() {
 
         val title = when {
             s.draining -> "送信待ち（未送信を送信中）"
+            s.transcribing -> "音声を文字起こし中"
             s.paused -> "一時停止中（マイク解放）"
-            else -> "録音・文字起こし中"
+            else -> "録音中（1時間ごと/終了時にまとめて文字起こし）"
         }
         val body = buildString {
-            s.modelName?.let { append(it).append(" / ") }
-            append("処理済 ${s.chunksDone} 件")
+            if (s.transcribing) {
+                val pct = (s.transcribeProgress * 100).toInt()
+                append(s.transcribeLabel ?: "音声").append(" を処理中 ").append(pct).append('%')
+            } else {
+                append("処理済 ${s.chunksDone} 区間")
+                if (s.queueSize > 0) append(" / 待機 ${s.queueSize}")
+            }
             if (s.lastText.isNotBlank()) {
                 append("\n直近: ").append(s.lastText.take(40))
             }
@@ -465,8 +519,11 @@ class AudioCaptureService : Service() {
         private const val WAKE_TAG = "ishilab.transcriber"
         private const val CHANNEL_ID = "transcription"
         private const val NOTIFICATION_ID = 1001
-        private const val QUEUE_CAPACITY = 8
-        private val POISON = FloatArray(0)
+        // これ未満の長さの区間は文字起こししない（1秒）。
+        private const val MIN_SEGMENT_SAMPLES = 16_000L
+        // 終了時、最後の区間の文字起こし完了を待つ上限。
+        private const val WORKER_JOIN_MS = 30 * 60 * 1000L
+        private val POISON = Segment(File(""), 0L, "")
 
         const val ACTION_START = "com.ishilab.transcriber.START"
         const val ACTION_PAUSE = "com.ishilab.transcriber.PAUSE"
@@ -497,6 +554,10 @@ data class ServiceState(
     val lastText: String = "",
     val currentFile: String? = null,
     val transcribing: Boolean = false,
+    /** 処理中の音声区間の表示ラベル（例: 「7/2 14時台」）。 */
+    val transcribeLabel: String? = null,
+    /** 現在処理中区間の進捗 0.0..1.0。 */
+    val transcribeProgress: Float = 0f,
     val draining: Boolean = false,
     val overloaded: Boolean = false,
     val error: String? = null,

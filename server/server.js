@@ -1,4 +1,4 @@
-// moneybot.jp 側の受信サーバー兼ウェブアプリ (Node.js + Express + MySQL)
+// AIHelper.jp 側の受信サーバー兼ウェブアプリ (Node.js + Express + MySQL)
 //
 // できること:
 //  - 端末アプリから文字起こしテキストを受信し MySQL に保存
@@ -12,6 +12,28 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+
+// .env があれば読み込む（既存の環境変数が優先。追加ライブラリは使わない）。
+// db.js は require 時に process.env を読むので、必ず db を require する前に実行する。
+(function loadDotEnv() {
+  try {
+    const envPath = path.join(__dirname, ".env");
+    if (!fs.existsSync(envPath)) return;
+    for (const line of fs.readFileSync(envPath, "utf8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$/);
+      if (!m || line.trimStart().startsWith("#")) continue;
+      let v = m[2];
+      if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+        v = v.slice(1, -1);
+      }
+      if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+    }
+    console.log(".env を読み込みました");
+  } catch (e) {
+    console.error(".env の読み込みに失敗:", e.message);
+  }
+})();
+
 const db = require("./db");
 const gemini = require("./gemini");
 const line = require("./line");
@@ -571,76 +593,97 @@ function renderDashboard(tableRows) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>moneybot — あなたの秘書</title>
+  <title>AIHelper — あなたの秘書</title>
   <style>
-    :root { --bg:#0f172a; --card:#fff; --accent:#2563eb; --green:#16a34a; --muted:#64748b; }
+    :root {
+      --accent:#4f46e5; --accent-2:#6366f1; --ink:#0f172a; --muted:#64748b;
+      --line:#e5e7eb; --bg:#f6f7fb; --card:#ffffff; --green:#16a34a; --danger:#dc2626;
+      --radius:16px; --shadow:0 6px 24px rgba(15,23,42,.06);
+    }
     * { box-sizing: border-box; }
-    body { font-family: system-ui, -apple-system, "Hiragino Kaku Gothic ProN", sans-serif;
-           margin: 0; background: #f1f5f9; color: #0f172a; }
-    header { background: var(--bg); color: #fff; padding: 1rem 1.5rem; }
-    header h1 { margin: 0; font-size: 1.25rem; }
-    header p { margin: .3rem 0 0; color: #cbd5e1; font-size: .85rem; }
-    main { max-width: 980px; margin: 1.25rem auto; padding: 0 1rem; display: grid; gap: 1.25rem; }
-    .card { background: var(--card); border-radius: 12px; padding: 1.1rem 1.25rem;
-            box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-    .card h2 { margin: 0 0 .8rem; font-size: 1.05rem; }
-    .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
-    input, select, textarea { font: inherit; padding: .5rem .6rem; border: 1px solid #cbd5e1;
-            border-radius: 8px; }
-    input, textarea { width: 100%; }
-    button { font: inherit; padding: .5rem .9rem; border: none; border-radius: 8px;
-             background: var(--accent); color: #fff; cursor: pointer; }
-    button.ghost { background: #e2e8f0; color: #0f172a; }
-    button.small { padding: .25rem .55rem; font-size: .8rem; }
-    .muted { color: var(--muted); font-size: .85rem; }
-    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
-    @media (max-width: 640px){ .grid2 { grid-template-columns: 1fr; } }
-    table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-    th, td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; }
-    th { background: #f8fafc; }
-    td.num { text-align: right; }
-    td.empty { text-align: center; color: #94a3b8; }
-    a.dl { display: inline-block; padding: 3px 8px; background: var(--accent);
-           color: #fff; text-decoration: none; border-radius: 6px; font-size: .8rem; }
-    a.dl.csv { background: var(--green); }
-    span.pending { color: #94a3b8; font-size: .85em; }
-    .task { display:flex; align-items:flex-start; gap:.6rem; padding:.5rem 0; border-bottom:1px solid #eef2f7; }
-    .task .body { flex:1; }
-    .badge { display:inline-block; font-size:.7rem; padding:.1rem .45rem; border-radius:999px; color:#fff; }
+    html { -webkit-text-size-adjust:100%; }
+    body { font-family: system-ui,-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+           margin:0; background:var(--bg); color:var(--ink); line-height:1.55; }
+    header { background:linear-gradient(135deg,var(--accent),var(--accent-2));
+             color:#fff; padding:1.5rem 1.25rem; }
+    header .wrap { max-width:980px; margin:0 auto; }
+    header h1 { margin:0; font-size:1.35rem; font-weight:700; letter-spacing:.02em; }
+    header p { margin:.35rem 0 0; color:#e0e7ff; font-size:.85rem; }
+    main { max-width:980px; margin:1.25rem auto 3rem; padding:0 1rem; display:grid; gap:1.1rem; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+            padding:1.2rem 1.3rem; box-shadow:var(--shadow); }
+    .card h2 { margin:0 0 .9rem; font-size:1.05rem; font-weight:700; }
+    .card h3 { font-size:.95rem; font-weight:700; }
+    .row { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+    label { font-size:.85rem; color:var(--muted); }
+    input, select, textarea { font:inherit; padding:.6rem .7rem; border:1px solid var(--line);
+            border-radius:10px; background:#fff; color:var(--ink); transition:border-color .15s,box-shadow .15s; }
+    input:focus, select:focus, textarea:focus { outline:none; border-color:var(--accent);
+            box-shadow:0 0 0 3px rgba(79,70,229,.15); }
+    input, textarea { width:100%; }
+    button { font:inherit; font-weight:600; padding:.6rem 1rem; border:none; border-radius:10px;
+             background:var(--accent); color:#fff; cursor:pointer; transition:filter .15s,transform .02s; }
+    button:hover { filter:brightness(1.06); }
+    button:active { transform:translateY(1px); }
+    button:disabled { opacity:.5; cursor:default; }
+    button.ghost { background:#eef2ff; color:var(--accent); }
+    button.small { padding:.3rem .6rem; font-size:.8rem; border-radius:8px; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:.6rem; }
+    @media (max-width:640px){ .grid2 { grid-template-columns:1fr; } }
+    table { border-collapse:collapse; width:100%; font-size:.9rem; }
+    th, td { border-bottom:1px solid var(--line); padding:.55rem .6rem; text-align:left; vertical-align:top; }
+    th { background:#f8fafc; font-weight:600; color:#475569; font-size:.82rem; }
+    tr:last-child td { border-bottom:none; }
+    td.num { text-align:right; } td.empty { text-align:center; color:#94a3b8; }
+    a.dl { display:inline-block; padding:.25rem .6rem; background:#eef2ff; color:var(--accent);
+           text-decoration:none; border-radius:8px; font-size:.8rem; font-weight:600; }
+    a.dl.csv { background:#dcfce7; color:#15803d; }
+    span.pending { color:#94a3b8; font-size:.85em; }
+    .badge { display:inline-block; font-size:.7rem; padding:.15rem .55rem; border-radius:999px;
+             color:#fff; font-weight:700; }
     .badge.kadai { background:#7c3aed; } .badge.yotei { background:#0891b2; }
-    .due { font-size:.8rem; } .due.soon { color:#dc2626; font-weight:600; }
-    .due.warn { color:#d97706; }
-    .chatlog { display:flex; flex-direction:column; gap:.5rem; max-height:320px; overflow:auto;
-               margin-bottom:.6rem; }
-    .bubble { padding:.55rem .75rem; border-radius:12px; max-width:85%; white-space:pre-wrap; line-height:1.4; }
-    .bubble.me { align-self:flex-end; background:var(--accent); color:#fff; }
-    .bubble.bot { align-self:flex-start; background:#eef2f7; }
-    .done { text-decoration: line-through; color:#94a3b8; }
-    .modalbg { position:fixed; inset:0; background:rgba(15,23,42,.55); display:flex;
-               align-items:center; justify-content:center; padding:1rem; z-index:50; }
-    .modalbox { background:#fff; border-radius:12px; padding:1rem 1.1rem; width:min(760px,100%);
-                max-height:85vh; display:flex; flex-direction:column; }
+    .due { font-size:.82rem; color:var(--muted); } .due.soon { color:var(--danger); font-weight:700; }
+    .due.warn { color:#d97706; font-weight:600; }
+    .chatlog { display:flex; flex-direction:column; gap:.5rem; max-height:340px; overflow:auto;
+               margin-bottom:.7rem; padding:.25rem; }
+    .bubble { padding:.6rem .8rem; border-radius:14px; max-width:82%; white-space:pre-wrap; line-height:1.5;
+              font-size:.92rem; }
+    .bubble.me { align-self:flex-end; background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+    .bubble.bot { align-self:flex-start; background:#f1f5f9; border-bottom-left-radius:4px; }
+    .done { text-decoration:line-through; color:#94a3b8; }
+    .modalbg { position:fixed; inset:0; background:rgba(15,23,42,.5); backdrop-filter:blur(2px);
+               display:flex; align-items:center; justify-content:center; padding:1rem; z-index:50; }
+    .modalbox { background:#fff; border-radius:var(--radius); padding:1.1rem 1.25rem; width:min(760px,100%);
+                max-height:85vh; display:flex; flex-direction:column; box-shadow:var(--shadow); }
     .modalpre { white-space:pre-wrap; word-break:break-word; overflow:auto; margin:.6rem 0 0;
-                font-size:.9rem; line-height:1.5; }
-    .tabs { display:flex; gap:.25rem; flex-wrap:wrap; }
-    .tab { background:#e2e8f0; color:#0f172a; }
-    .tab.active { background:var(--accent); color:#fff; }
+                font-size:.9rem; line-height:1.6; background:#f8fafc; padding:.8rem; border-radius:10px; }
+    /* タブ: スティッキーな横並びナビ */
+    .tabs { display:flex; gap:.35rem; flex-wrap:wrap; position:sticky; top:0; z-index:10;
+            background:var(--bg); padding:.5rem 0; }
+    .tab { background:transparent; color:var(--muted); font-weight:600; border:1px solid transparent; }
+    .tab:hover { color:var(--accent); }
+    .tab.active { background:#fff; color:var(--accent); border-color:var(--line); box-shadow:var(--shadow); }
     .panel { display:none; }
-    .panel.active { display:block; }
-    .login-wrap { max-width:420px; margin:2rem auto; text-align:center; }
-    hr { border:none; border-top:1px solid #e2e8f0; margin:1rem 0; }
+    .panel.active { display:block; animation:fade .2s ease; }
+    @keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
+    .login-wrap { max-width:420px; margin:3rem auto; text-align:center; }
+    .login-wrap h2 { font-size:1.5rem; }
+    hr { border:none; border-top:1px solid var(--line); margin:1.1rem 0; }
   </style>
 </head>
 <body>
   <header>
-    <h1>🗒️ moneybot — あなたの秘書</h1>
-    <p>常時録音から課題・予定を拾い、締切前に LINE で警告。聞けば答え、頼めば登録します。</p>
+    <div class="wrap">
+      <h1>AIHelper — あなたの秘書</h1>
+      <p>常時録音から課題・予定を拾い、締切前に通知。聞けば答え、頼めば登録します。</p>
+    </div>
   </header>
   <main>
     <!-- ログイン画面: ボタンのみ。押すとフォームが出る -->
     <div id="login">
       <section class="card login-wrap">
-        <h2 style="margin:.2rem 0">moneybot</h2>
+        <h2 style="margin:.2rem 0">AIHelper</h2>
         <p class="muted">常時録音から課題・予定を整理し、締切前に通知します。</p>
         <div class="row" style="justify-content:center; margin-top:1rem">
           <button onclick="showForm('login')">ログイン</button>
@@ -671,7 +714,7 @@ function renderDashboard(tableRows) {
       </nav>
 
       <section class="card panel" data-panel="chat">
-        <h2>💬 秘書に聞く / 頼む</h2>
+        <h2>秘書に聞く / 頼む</h2>
         <div id="chatlog" class="chatlog"></div>
         <div class="row">
           <input id="q" placeholder="例）今日の予定は？ / 来週月曜10時にゼミ入れといて"
@@ -682,7 +725,7 @@ function renderDashboard(tableRows) {
       </section>
 
       <section class="card panel" data-panel="tasks">
-        <h2>⏰ 課題・予定</h2>
+        <h2>課題・予定</h2>
         <div class="row" style="margin-bottom:.6rem">
           <label class="muted">表示:</label>
           <select id="taskFilter" onchange="renderTasks()">
@@ -708,13 +751,13 @@ function renderDashboard(tableRows) {
       </section>
 
       <section class="card panel" data-panel="summary">
-        <h2>📅 今日の要約</h2>
+        <h2>今日の要約</h2>
         <div id="summary"><p class="muted">読み込み中…</p></div>
         <button class="ghost small" style="margin-top:.5rem" onclick="genSummary()">今すぐ生成し直す</button>
       </section>
 
       <section class="card panel" data-panel="files">
-        <h2>📂 受信した文字起こしファイル</h2>
+        <h2>受信した文字起こしファイル</h2>
         <table>
           <thead><tr><th>アカウント</th><th>ファイル名</th><th>文字数</th><th>更新</th><th></th><th>課題/予定</th></tr></thead>
           <tbody>${tableRows}</tbody>
@@ -722,7 +765,7 @@ function renderDashboard(tableRows) {
       </section>
 
       <section class="card panel" data-panel="account">
-        <h2>👤 アカウント</h2>
+        <h2>アカウント</h2>
         <p>ログイン中: <strong id="accEmail"></strong></p>
         <hr>
         <h3 style="font-size:.95rem; margin:.2rem 0 .6rem">パスワード変更</h3>
@@ -948,9 +991,9 @@ async function main() {
   reminders.start(resolveLineTarget);
 
   app.listen(PORT, () => {
-    console.log(`moneybot listening on http://localhost:${PORT}`);
+    console.log(`AIHelper listening on http://localhost:${PORT}`);
     console.log(`accounts: ${ACCOUNTS_FILE}`);
-    console.log(`DB: ${process.env.DB_NAME || "moneybot"}@${process.env.DB_HOST || "localhost"}`);
+    console.log(`DB: ${process.env.DB_NAME || "aihelper"}@${process.env.DB_HOST || "localhost"}`);
     console.log(`Gemini: ${gemini.isConfigured() ? gemini.MODEL : "未設定"} / LINE: ${line.isConfigured() ? "有効" : "未設定"}`);
     if (line.isConfigured()) {
       scheduleDailySummary();

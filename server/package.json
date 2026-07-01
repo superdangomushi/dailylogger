@@ -1,7 +1,7 @@
 {
-  "name": "moneybot-receiver",
+  "name": "aihelper-receiver",
   "version": "1.0.0",
-  "description": "文字起こしテキストを受け取り MySQL に保存する moneybot.jp 側の簡易サーバー",
+  "description": "文字起こしテキストを受け取り MySQL に保存する AIHelper 側の簡易サーバー",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {

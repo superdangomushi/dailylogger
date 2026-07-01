@@ -7,12 +7,12 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * moneybot.jp とやり取りするためのクライアント。
+ * AIHelper.jp とやり取りするためのクライアント。
  *
  * 追加ライブラリを増やさないため HttpURLConnection と org.json のみで実装する。
  * 通信はブロッキングなので必ずワーカースレッド（Dispatchers.IO）から呼ぶこと。
  */
-class MoneybotClient {
+class AiHelperClient {
 
     sealed interface Result {
         data class Ok(val message: String) : Result

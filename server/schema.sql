@@ -1,10 +1,10 @@
--- moneybot 受信サーバー用のスキーマ
+-- aihelper 受信サーバー用のスキーマ
 -- 文字起こしテキストを保存し、Gemini で抽出した課題・予定や日次要約も保存する。
 
-CREATE DATABASE IF NOT EXISTS moneybot
+CREATE DATABASE IF NOT EXISTS aihelper
   CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-USE moneybot;
+USE aihelper;
 
 -- 端末から送られてくる文字起こしテキスト（1ファイル = 1行）。
 CREATE TABLE IF NOT EXISTS transcripts (

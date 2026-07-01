@@ -7,9 +7,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -34,6 +36,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
@@ -58,6 +61,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
@@ -66,14 +70,29 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.android.gms.auth.api.signin.GoogleSignIn
+import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.ishilab.transcriber.model.WhisperModel
-import com.ishilab.transcriber.net.MoneybotClient
+import com.ishilab.transcriber.net.AiHelperClient
 import com.ishilab.transcriber.service.AudioCaptureService
 import com.ishilab.transcriber.service.ServiceState
 import com.ishilab.transcriber.ui.MainViewModel
 import com.ishilab.transcriber.ui.TranscriptItem
 import com.ishilab.transcriber.ui.UiState
 import java.io.File
+
+/** アプリ全体の配色（Web と揃えたインディゴ基調）。 */
+private val AppColorScheme = lightColorScheme(
+    primary = Color(0xFF4F46E5),
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFE0E7FF),
+    onPrimaryContainer = Color(0xFF1E1B4B),
+    secondary = Color(0xFF0891B2),
+    tertiary = Color(0xFF7C3AED),
+    background = Color(0xFFF6F7FB),
+    surface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFFEEF2F7),
+)
 
 class MainActivity : ComponentActivity() {
 
@@ -85,11 +104,19 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestNeededPermissions()
+        // 録音していないときでも「締切が近い予定・課題」を定期通知する。
+        com.ishilab.transcriber.service.ReminderReceiver.schedule(this)
         setContent {
-            MaterialTheme {
+            MaterialTheme(colorScheme = AppColorScheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val ui by viewModel.ui.collectAsState()
                     val service by AudioCaptureService.state.collectAsStateWithLifecycle()
+                    val signInClient = remember {
+                        GoogleSignIn.getClient(this@MainActivity, GoogleCalendarClient.signInOptions())
+                    }
+                    val googleLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.StartActivityForResult()
+                    ) { viewModel.refreshGoogle() }
                     MainScreen(
                         ui = ui,
                         service = service,
@@ -101,13 +128,20 @@ class MainActivity : ComponentActivity() {
                         onLogin = viewModel::login,
                         onRegister = viewModel::register,
                         onLogout = viewModel::logout,
-                        onSend = viewModel::sendToMoneybot,
+                        onSend = viewModel::sendToServer,
                         onAsk = viewModel::ask,
                         onLoadTasks = { viewModel.loadTasks() },
                         onToggleTask = viewModel::toggleTaskDone,
                         onSetShowDone = { viewModel.loadTasks(it) },
                         onLoadSummary = viewModel::loadSummary,
                         onGenerateSummary = viewModel::generateSummary,
+                        onConnectGoogle = { googleLauncher.launch(signInClient.signInIntent) },
+                        onDisconnectGoogle = {
+                            signInClient.signOut()
+                            viewModel.onGoogleDisconnected()
+                        },
+                        onLoadCalendar = viewModel::loadCalendar,
+                        onAddToCalendar = viewModel::addTaskToCalendar,
                     )
                 }
             }
@@ -117,6 +151,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refresh()
+        viewModel.refreshGoogle()
     }
 
     private fun requestNeededPermissions() {
@@ -147,10 +182,14 @@ private fun MainScreen(
     onSend: (TranscriptItem) -> Unit,
     onAsk: (String) -> Unit,
     onLoadTasks: () -> Unit,
-    onToggleTask: (MoneybotClient.Task) -> Unit,
+    onToggleTask: (AiHelperClient.Task) -> Unit,
     onSetShowDone: (Boolean) -> Unit,
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
+    onConnectGoogle: () -> Unit,
+    onDisconnectGoogle: () -> Unit,
+    onLoadCalendar: () -> Unit,
+    onAddToCalendar: (AiHelperClient.Task) -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
     Box(modifier = Modifier.fillMaxSize()) {
@@ -164,27 +203,32 @@ private fun MainScreen(
             ) {
                 TabRow(selectedTabIndex = tab) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("録音") })
-                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("予定・秘書") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("記録") })
+                    Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("予定・秘書") })
                 }
                 when (tab) {
-                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop, onRefresh, onSend)
+                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop)
+                    1 -> RecordsTab(ui, onRefresh, onSend)
                     else -> SecretaryTab(
                         ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
-                        onLoadSummary, onGenerateSummary
+                        onLoadSummary, onGenerateSummary,
+                        onConnectGoogle, onDisconnectGoogle, onLoadCalendar, onAddToCalendar
                     )
                 }
             }
         }
-        // 音声→テキスト変換中は右上に小さくスピナー表示（操作は妨げない）。
+        // 音声→テキスト変換中は右上に小さく表示（操作は妨げない）。どの区間かと進捗も出す。
         if (service.transcribing) {
-            TranscribingBadge()
+            TranscribingBadge(service)
         }
     }
 }
 
 /** 文字起こし処理中を右上にちょこんと示す小さなインジケータ（画面操作はブロックしない）。 */
 @Composable
-private fun BoxScope.TranscribingBadge() {
+private fun BoxScope.TranscribingBadge(service: ServiceState) {
+    val pct = (service.transcribeProgress * 100).toInt()
+    val label = service.transcribeLabel
     Surface(
         shape = RoundedCornerShape(50),
         tonalElevation = 6.dp,
@@ -199,7 +243,10 @@ private fun BoxScope.TranscribingBadge() {
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            Text("処理中", style = MaterialTheme.typography.labelMedium)
+            Text(
+                if (label != null) "$label 処理中 $pct%" else "処理中 $pct%",
+                style = MaterialTheme.typography.labelMedium
+            )
         }
     }
 }
@@ -213,10 +260,7 @@ private fun RecordingTab(
     onSelectModel: (WhisperModel) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
-    onRefresh: () -> Unit,
-    onSend: (TranscriptItem) -> Unit,
 ) {
-    val context = LocalContext.current
     // タブ内は単一の LazyColumn にして全体をスクロール可能に保つ。
     LazyColumn(
         modifier = Modifier
@@ -239,31 +283,155 @@ private fun RecordingTab(
         ui.sendMessage?.let { msg ->
             item { Text(msg, style = MaterialTheme.typography.bodySmall) }
         }
+    }
+}
 
+/** 文字起こし記録を「日付 → 時刻 → 本文」の階層で辿るタブ。 */
+@Composable
+private fun RecordsTab(
+    ui: UiState,
+    onRefresh: () -> Unit,
+    onSend: (TranscriptItem) -> Unit,
+) {
+    val context = LocalContext.current
+    var openDate by rememberSaveable { mutableStateOf<String?>(null) }
+    var openFile by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // ファイル名 "yyyy-MM-dd_HH.txt" を日付・時でグループ化。
+    fun dateOf(name: String) = if (name.length >= 10) name.take(10) else name
+    fun hourOf(name: String) = if (name.length >= 13) name.substring(11, 13) else "--"
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        // ヘッダー（パンくず＋更新）
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("文字起こしファイル", style = MaterialTheme.typography.titleMedium)
+                val crumb = when {
+                    openFile != null -> "記録 › $openDate › ${hourOf(openFile!!)}時台"
+                    openDate != null -> "記録 › $openDate"
+                    else -> "記録（日付一覧）"
+                }
+                Text(crumb, style = MaterialTheme.typography.titleMedium)
                 OutlinedButton(onClick = onRefresh) { Text("更新") }
             }
         }
 
         if (ui.transcripts.isEmpty()) {
-            item {
-                Text("まだファイルがありません。", style = MaterialTheme.typography.bodySmall)
+            item { Text("まだ記録がありません。", style = MaterialTheme.typography.bodySmall) }
+            return@LazyColumn
+        }
+
+        when {
+            // ---- 第3階層: 本文表示 ----
+            openFile != null -> {
+                val item = ui.transcripts.firstOrNull { it.name == openFile }
+                item { TextButton(onClick = { openFile = null }) { Text("← ${openDate} の時刻一覧へ") } }
+                if (item == null) {
+                    item { Text("ファイルが見つかりません。", style = MaterialTheme.typography.bodySmall) }
+                } else {
+                    item { TranscriptDetail(item, ui, onSend, context) }
+                }
             }
-        } else {
-            items(ui.transcripts) { item ->
-                TranscriptCard(item, ui, onSend, context)
+            // ---- 第2階層: 選択した日付の時刻一覧 ----
+            openDate != null -> {
+                item { TextButton(onClick = { openDate = null }) { Text("← 日付一覧へ") } }
+                val hours = ui.transcripts
+                    .filter { dateOf(it.name) == openDate }
+                    .sortedByDescending { it.name }
+                items(hours) { item ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { openFile = item.name }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("${hourOf(item.name)}時台", style = MaterialTheme.typography.bodyLarge)
+                            Text("${item.sizeBytes} bytes ›", style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+            // ---- 第1階層: 日付一覧 ----
+            else -> {
+                val byDate = ui.transcripts.groupBy { dateOf(it.name) }
+                    .toSortedMap(compareByDescending { it })
+                byDate.forEach { (date, files) ->
+                    item {
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { openDate = date }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(14.dp).fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(date, style = MaterialTheme.typography.bodyLarge)
+                                Text("${files.size} 件 ›", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
-/** moneybot 連携（ログイン）・予定/課題の確認・秘書チャットをまとめたタブ。 */
+/** 本文と操作（共有・送信）をまとめた詳細表示。 */
+@Composable
+private fun TranscriptDetail(
+    item: TranscriptItem,
+    ui: UiState,
+    onSend: (TranscriptItem) -> Unit,
+    context: android.content.Context,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(item.name, style = MaterialTheme.typography.titleSmall)
+            val content by produceState<String?>(null, item.path, item.sizeBytes) {
+                value = withContext(Dispatchers.IO) {
+                    runCatching { File(item.path).readText() }.getOrElse { "読み込み失敗: ${it.message}" }
+                }
+            }
+            if (content == null) {
+                Text("読み込み中…", style = MaterialTheme.typography.bodySmall)
+            } else {
+                Text(
+                    content!!.ifBlank { "（空です）" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState())
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { shareFile(context, item.path) }) { Text("共有") }
+                val sending = ui.sendingFile == item.name
+                val sent = item.name in ui.sentFiles
+                Button(
+                    onClick = { onSend(item) },
+                    enabled = ui.account.loggedIn && ui.sendingFile == null && !sent
+                ) {
+                    Text(when { sending -> "送信中…"; sent -> "送信済み"; else -> "サーバーへ送信" })
+                }
+            }
+        }
+    }
+}
+
+/** AIHelper 連携（ログイン）・予定/課題の確認・秘書チャットをまとめたタブ。 */
 @Composable
 private fun SecretaryTab(
     ui: UiState,
@@ -272,10 +440,14 @@ private fun SecretaryTab(
     onLogout: () -> Unit,
     onAsk: (String) -> Unit,
     onLoadTasks: () -> Unit,
-    onToggleTask: (MoneybotClient.Task) -> Unit,
+    onToggleTask: (AiHelperClient.Task) -> Unit,
     onSetShowDone: (Boolean) -> Unit,
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
+    onConnectGoogle: () -> Unit,
+    onDisconnectGoogle: () -> Unit,
+    onLoadCalendar: () -> Unit,
+    onAddToCalendar: (AiHelperClient.Task) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -283,17 +455,20 @@ private fun SecretaryTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item { MoneybotCard(ui, onLogin, onRegister, onLogout) }
+        item { AiHelperCard(ui, onLogin, onRegister, onLogout) }
 
         if (!ui.account.loggedIn) {
             item {
                 Text(
-                    "moneybot.jp にログインすると、今日の要約・予定・課題の確認と秘書チャットが使えます。",
+                    "AIHelper.jp にログインすると、今日の要約・予定・課題の確認と秘書チャットが使えます。",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
             return@LazyColumn
         }
+
+        // ---- Google カレンダー連携 ----
+        item { GoogleCalendarCard(ui, onConnectGoogle, onDisconnectGoogle, onLoadCalendar) }
 
         // ---- 今日の要約 ----
         item { SummaryCard(ui, onLoadSummary, onGenerateSummary) }
@@ -327,12 +502,60 @@ private fun SecretaryTab(
                 Text("表示できる予定・課題はありません。", style = MaterialTheme.typography.bodySmall)
             }
             else -> items(ui.tasks) { task ->
-                TaskCard(task, onToggleTask)
+                TaskCard(task, onToggleTask, if (ui.googleConnected) onAddToCalendar else null)
             }
+        }
+
+        ui.googleMessage?.let { msg ->
+            item { Text(msg, style = MaterialTheme.typography.bodySmall) }
         }
 
         // ---- 秘書チャット ----
         item { SecretaryCard(ui, onAsk) }
+    }
+}
+
+/** Google カレンダー連携カード。未連携なら接続ボタン、連携済みなら直近の予定を表示。 */
+@Composable
+private fun GoogleCalendarCard(
+    ui: UiState,
+    onConnectGoogle: () -> Unit,
+    onDisconnectGoogle: () -> Unit,
+    onLoadCalendar: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Google カレンダー", style = MaterialTheme.typography.titleMedium)
+                if (ui.googleConnected) {
+                    OutlinedButton(onClick = onLoadCalendar, enabled = !ui.googleBusy) { Text("更新") }
+                }
+            }
+            if (!ui.googleConnected) {
+                Text(
+                    "連携すると、課題・予定の締切をカレンダーに登録したり、直近の予定を表示できます。",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Button(onClick = onConnectGoogle) { Text("Google と連携") }
+            } else {
+                Text("連携中: ${ui.googleEmail}", style = MaterialTheme.typography.bodySmall)
+                if (ui.calendarEvents.isEmpty()) {
+                    Text(
+                        if (ui.googleBusy) "読み込み中…" else "直近の予定はありません。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                } else {
+                    ui.calendarEvents.take(8).forEach { ev ->
+                        Text("・${ev.whenText}  ${ev.title}", style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+                TextButton(onClick = onDisconnectGoogle) { Text("連携を解除") }
+            }
+        }
     }
 }
 
@@ -379,9 +602,13 @@ private fun SummaryCard(
     }
 }
 
-/** 予定・課題1件のカード。チェックで完了/未完了を切替。 */
+/** 予定・課題1件のカード。チェックで完了/未完了を切替。onAddToCalendar があれば登録ボタンを出す。 */
 @Composable
-private fun TaskCard(task: MoneybotClient.Task, onToggleTask: (MoneybotClient.Task) -> Unit) {
+private fun TaskCard(
+    task: AiHelperClient.Task,
+    onToggleTask: (AiHelperClient.Task) -> Unit,
+    onAddToCalendar: ((AiHelperClient.Task) -> Unit)? = null,
+) {
     val isYotei = task.type == "yotei"
     val label = if (isYotei) "予定" else "課題"
     val labelColor = if (isYotei) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
@@ -406,6 +633,12 @@ private fun TaskCard(task: MoneybotClient.Task, onToggleTask: (MoneybotClient.Ta
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                if (onAddToCalendar != null && !task.deadline.isNullOrBlank()) {
+                    TextButton(
+                        onClick = { onAddToCalendar(task) },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                    ) { Text("カレンダーに追加") }
+                }
             }
         }
     }
@@ -423,25 +656,34 @@ private fun StatusCard(service: ServiceState) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             val status = when {
+                service.draining -> "送信待ち（未送信を送信中）"
+                service.transcribing -> "音声を文字起こし中"
                 !service.active -> "停止中"
                 service.paused -> "一時停止中（マイク解放中）"
-                else -> "録音・文字起こし中"
+                else -> "録音中"
             }
             Text("状態: $status", style = MaterialTheme.typography.titleMedium)
-            if (service.active) {
+            if (service.active && !service.transcribing) {
                 val elapsedMs = rememberRecordingElapsed(service)
                 Text("録音時間: ${formatDuration(elapsedMs)}")
-            }
-            service.modelName?.let { Text("モデル: $it") }
-            Text("処理済チャンク: ${service.chunksDone}  待機: ${service.queueSize}  破棄: ${service.dropped}")
-            if (service.overloaded) {
                 Text(
-                    "⚠ 端末の処理が追いついていません。より軽いモデル（tiny/base）を選ぶと改善します。",
-                    color = MaterialTheme.colorScheme.error,
+                    "※ 文字起こしは1時間ごと、または終了時にまとめて実行します。",
                     style = MaterialTheme.typography.bodySmall
                 )
             }
-            service.currentFile?.let { Text("出力中: $it") }
+            // 現在どの区間を処理しているかと進捗。
+            if (service.transcribing) {
+                val pct = (service.transcribeProgress * 100).toInt()
+                Text("処理中の音声: ${service.transcribeLabel ?: "-"}")
+                LinearProgressIndicator(
+                    progress = { service.transcribeProgress },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text("$pct%", style = MaterialTheme.typography.bodySmall)
+            }
+            service.modelName?.let { Text("モデル: $it") }
+            Text("処理済: ${service.chunksDone} 区間  待機: ${service.queueSize} 区間")
+            service.currentFile?.let { Text("最新の出力: $it") }
             if (service.lastText.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text(
@@ -571,9 +813,9 @@ private fun ModelCard(
     }
 }
 
-/** moneybot.jp のログイン / アカウント表示。 */
+/** AIHelper.jp のログイン / アカウント表示。 */
 @Composable
-private fun MoneybotCard(
+private fun AiHelperCard(
     ui: UiState,
     onLogin: (String, String, String) -> Unit,
     onRegister: (String, String, String) -> Unit,
@@ -582,20 +824,20 @@ private fun MoneybotCard(
     val account = ui.account
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("moneybot.jp 連携", style = MaterialTheme.typography.titleMedium)
+            Text("AIHelper.jp 連携", style = MaterialTheme.typography.titleMedium)
             if (account.loggedIn) {
                 Text("ログイン中: ${account.email}")
                 Text(account.baseUrl, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = onLogout) { Text("ログアウト") }
             } else {
-                MoneybotLoginForm(ui, onLogin, onRegister)
+                AiHelperLoginForm(ui, onLogin, onRegister)
             }
         }
     }
 }
 
 @Composable
-private fun MoneybotLoginForm(
+private fun AiHelperLoginForm(
     ui: UiState,
     onLogin: (String, String, String) -> Unit,
     onRegister: (String, String, String) -> Unit,
@@ -686,67 +928,6 @@ private fun SecretaryCard(ui: UiState, onAsk: (String) -> Unit) {
                     CircularProgressIndicator(modifier = Modifier.height(18.dp), strokeWidth = 2.dp)
                 } else {
                     Text("送信")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TranscriptCard(
-    item: TranscriptItem,
-    ui: UiState,
-    onSend: (TranscriptItem) -> Unit,
-    context: android.content.Context,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Text(item.name, style = MaterialTheme.typography.titleSmall)
-            Text("${item.sizeBytes} bytes", style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { expanded = !expanded }) {
-                    Text(if (expanded) "閉じる" else "本文")
-                }
-                OutlinedButton(onClick = { shareFile(context, item.path) }) {
-                    Text("共有")
-                }
-                val sending = ui.sendingFile == item.name
-                val sent = item.name in ui.sentFiles
-                Button(
-                    onClick = { onSend(item) },
-                    enabled = ui.account.loggedIn && ui.sendingFile == null && !sent
-                ) {
-                    Text(
-                        when {
-                            sending -> "送信中…"
-                            sent -> "送信済み"
-                            else -> "moneybotへ送信"
-                        }
-                    )
-                }
-            }
-            if (expanded) {
-                // 本文はファイルサイズ変化のたびに読み直す（録音中の現在ファイルにも追随）。
-                val content by produceState<String?>(null, item.path, item.sizeBytes) {
-                    value = withContext(Dispatchers.IO) {
-                        runCatching { File(item.path).readText() }
-                            .getOrElse { "読み込み失敗: ${it.message}" }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                if (content == null) {
-                    Text("読み込み中…", style = MaterialTheme.typography.bodySmall)
-                } else {
-                    Text(
-                        content!!.ifBlank { "（空です）" },
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 240.dp)
-                            .verticalScroll(rememberScrollState())
-                    )
                 }
             }
         }

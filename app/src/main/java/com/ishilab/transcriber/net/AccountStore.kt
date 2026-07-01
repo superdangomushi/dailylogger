@@ -3,12 +3,12 @@ package com.ishilab.transcriber.net
 import android.content.Context
 
 /**
- * moneybot.jp のログイン情報（接続先URL・アカウント・トークン）を端末に保存する。
+ * AIHelper.jp のログイン情報（接続先URL・アカウント・トークン）を端末に保存する。
  * ログインに成功したアカウントだけを保持し、送信時に再利用する。
  */
 class AccountStore(context: Context) {
 
-    private val prefs = context.getSharedPreferences("moneybot", Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences("AIHelper", Context.MODE_PRIVATE)
 
     var baseUrl: String
         get() = prefs.getString(KEY_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
@@ -43,7 +43,7 @@ class AccountStore(context: Context) {
     }
 
     private companion object {
-        const val DEFAULT_BASE_URL = "https://moneybot.jp"
+        const val DEFAULT_BASE_URL = "https://AIHelper.jp"
         const val KEY_BASE_URL = "base_url"
         const val KEY_EMAIL = "email"
         const val KEY_TOKEN = "token"

@@ -43,6 +43,11 @@
             android:name=".service.MicControlReceiver"
             android:exported="false" />
 
+        <!-- 予定・課題の締切が近いときの定期通知（録音していないときも動く） -->
+        <receiver
+            android:name=".service.ReminderReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
