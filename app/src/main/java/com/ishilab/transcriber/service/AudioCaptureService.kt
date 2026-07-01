@@ -150,7 +150,7 @@ class AudioCaptureService : Service() {
             engine = null
             if (wakeLock.isHeld) wakeLock.release()
         }
-        pushState { it.copy(active = false, paused = false, recordingStartedElapsed = 0L) }
+        pushState { it.copy(active = false, paused = false, transcribing = false, recordingStartedElapsed = 0L) }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -308,11 +308,14 @@ class AudioCaptureService : Service() {
             if (AudioChunker.isSilent(chunk)) {
                 continue
             }
+            pushState { it.copy(transcribing = true) }
             val text = try {
                 engine?.transcribe(chunk).orEmpty()
             } catch (e: Exception) {
                 Log.e(TAG, "transcribe error", e)
                 ""
+            } finally {
+                pushState { it.copy(transcribing = false) }
             }
             if (text.isNotBlank()) {
                 val now = System.currentTimeMillis()
@@ -448,6 +451,7 @@ data class ServiceState(
     val queueSize: Int = 0,
     val lastText: String = "",
     val currentFile: String? = null,
+    val transcribing: Boolean = false,
     val error: String? = null,
     /** 現在のマイク稼働区間の開始時刻(elapsedRealtime)。0 のとき計測停止中。 */
     val recordingStartedElapsed: Long = 0L,

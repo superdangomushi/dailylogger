@@ -10,7 +10,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -20,6 +22,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -54,6 +57,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
@@ -147,24 +151,55 @@ private fun MainScreen(
     onGenerateSummary: () -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
-    Scaffold(
-        topBar = { TopAppBar(title = { Text("常時録音・ローカル文字起こし") }) }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            TabRow(selectedTabIndex = tab) {
-                Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("録音") })
-                Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("予定・秘書") })
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = { TopAppBar(title = { Text("常時録音・ローカル文字起こし") }) }
+        ) { padding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                TabRow(selectedTabIndex = tab) {
+                    Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("録音") })
+                    Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("予定・秘書") })
+                }
+                when (tab) {
+                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop, onRefresh, onSend)
+                    else -> SecretaryTab(
+                        ui, onLogin, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
+                        onLoadSummary, onGenerateSummary
+                    )
+                }
             }
-            when (tab) {
-                0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop, onRefresh, onSend)
-                else -> SecretaryTab(
-                    ui, onLogin, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
-                    onLoadSummary, onGenerateSummary
-                )
+        }
+        // 音声→テキスト変換中は画面中央にスピナーと進捗を表示。
+        if (service.transcribing) {
+            TranscribingOverlay(service)
+        }
+    }
+}
+
+/** 文字起こし処理中に画面中央でぐるぐる表示するオーバーレイ。 */
+@Composable
+private fun TranscribingOverlay(service: ServiceState) {
+    val denom = service.chunksDone + service.queueSize + 1
+    val percent = (service.chunksDone * 100) / denom
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.25f)),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(shape = RoundedCornerShape(16.dp), tonalElevation = 6.dp) {
+            Column(
+                modifier = Modifier.padding(28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                CircularProgressIndicator()
+                Text("音声処理中です…", style = MaterialTheme.typography.titleMedium)
+                Text("現在 $percent%", style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
