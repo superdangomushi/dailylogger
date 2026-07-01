@@ -878,17 +878,22 @@ function renderDashboard(tableRows) {
       else if(f==='yotei') list = list.filter(t => t.type==='yotei');
       else if(f==='overdue') list = list.filter(t => { const d=parseDeadline(t.deadline_at); return d && d<now && t.status!=='done'; });
       if(!list.length){ $('tasks').innerHTML='<p class="muted">該当する項目はありません。</p>'; return; }
-      $('tasks').innerHTML = list.map(t => {
+      const rows = list.map(t => {
         const done = t.status==='done';
         const label = t.type==='yotei' ? '予定' : '課題';
-        return '<div class="task">'+
-          '<input type="checkbox" '+(done?'checked':'')+' onchange="toggle('+t.id+',this.checked)">'+
-          '<div class="body"><span class="badge '+(t.type==='yotei'?'yotei':'kadai')+'">'+label+'</span> '+
-          '<span class="'+(done?'done':'')+'">'+escapeHtml(t.content)+'</span>'+
-          '<div class="due '+dueClass(t.deadline_at)+'">'+escapeHtml(dueText(t))+'</div>'+
-          (t.details?'<div class="muted">'+escapeHtml(t.details)+'</div>':'')+'</div>'+
-          '<button class="ghost small" onclick="delTask('+t.id+')">削除</button></div>';
+        const details = t.details ? '<div class="muted">'+escapeHtml(t.details)+'</div>' : '';
+        return '<tr>'+
+          '<td><span class="badge '+(t.type==='yotei'?'yotei':'kadai')+'">'+label+'</span></td>'+
+          '<td class="'+(done?'done':'')+'">'+escapeHtml(t.content)+details+'</td>'+
+          '<td class="due '+dueClass(t.deadline_at)+'">'+escapeHtml(dueText(t))+'</td>'+
+          '<td style="text-align:center"><input type="checkbox" '+(done?'checked':'')+
+            ' onchange="toggle('+t.id+',this.checked)"></td>'+
+          '<td><button class="ghost small" onclick="delTask('+t.id+')">削除</button></td>'+
+        '</tr>';
       }).join('');
+      $('tasks').innerHTML =
+        '<table><thead><tr><th>種別</th><th>内容</th><th>期限</th><th>完了</th><th></th></tr></thead>'+
+        '<tbody>'+rows+'</tbody></table>';
     }
     async function toggle(id, done){
       await fetch('/api/tasks/'+id+'/done',{method:'POST',headers:headers(),

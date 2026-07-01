@@ -112,32 +112,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** moneybot.jp にログイン。サーバーでアカウント情報＋トークンの一致を確認する。 */
-    fun login(baseUrl: String, email: String, token: String) {
+    /** moneybot.jp にログイン（メール＋パスワード）。成功するとトークンを受け取り保存する。 */
+    fun login(baseUrl: String, email: String, password: String) =
+        authenticate(baseUrl, email, password, register = false)
+
+    /** 新規登録（メール＋パスワード）。成功するとそのままログイン状態になる。 */
+    fun register(baseUrl: String, email: String, password: String) =
+        authenticate(baseUrl, email, password, register = true)
+
+    private fun authenticate(baseUrl: String, email: String, password: String, register: Boolean) {
         if (_ui.value.loginInProgress) return
         val url = baseUrl.trim()
         val mail = email.trim()
-        val tok = token.trim()
-        if (url.isEmpty() || mail.isEmpty() || tok.isEmpty()) {
-            _ui.update { it.copy(loginError = "URL・メール・トークンをすべて入力してください") }
+        if (url.isEmpty() || mail.isEmpty() || password.isEmpty()) {
+            _ui.update { it.copy(loginError = "URL・メール・パスワードをすべて入力してください") }
             return
         }
         _ui.update { it.copy(loginInProgress = true, loginError = null) }
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { moneybot.login(url, mail, tok) }
-            when (result) {
-                is MoneybotClient.Result.Ok -> {
-                    accountStore.save(url, mail, tok)
+            val result = withContext(Dispatchers.IO) {
+                if (register) moneybot.register(url, mail, password) else moneybot.login(url, mail, password)
+            }
+            result.fold(
+                onSuccess = { token ->
+                    accountStore.save(url, mail, token)
                     _ui.update {
                         it.copy(loginInProgress = false, loginError = null, account = currentAccount())
                     }
                     loadTasks()
                     loadSummary()
+                },
+                onFailure = { e ->
+                    _ui.update {
+                        it.copy(loginInProgress = false, loginError = e.message ?: "認証に失敗しました")
+                    }
                 }
-                is MoneybotClient.Result.Error -> {
-                    _ui.update { it.copy(loginInProgress = false, loginError = result.message) }
-                }
-            }
+            )
         }
     }
 

@@ -99,6 +99,7 @@ class MainActivity : ComponentActivity() {
                         onStop = { AudioCaptureService.stop(this) },
                         onRefresh = viewModel::refresh,
                         onLogin = viewModel::login,
+                        onRegister = viewModel::register,
                         onLogout = viewModel::logout,
                         onSend = viewModel::sendToMoneybot,
                         onAsk = viewModel::ask,
@@ -141,6 +142,7 @@ private fun MainScreen(
     onStop: () -> Unit,
     onRefresh: () -> Unit,
     onLogin: (String, String, String) -> Unit,
+    onRegister: (String, String, String) -> Unit,
     onLogout: () -> Unit,
     onSend: (TranscriptItem) -> Unit,
     onAsk: (String) -> Unit,
@@ -167,7 +169,7 @@ private fun MainScreen(
                 when (tab) {
                     0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop, onRefresh, onSend)
                     else -> SecretaryTab(
-                        ui, onLogin, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
+                        ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
                         onLoadSummary, onGenerateSummary
                     )
                 }
@@ -266,6 +268,7 @@ private fun RecordingTab(
 private fun SecretaryTab(
     ui: UiState,
     onLogin: (String, String, String) -> Unit,
+    onRegister: (String, String, String) -> Unit,
     onLogout: () -> Unit,
     onAsk: (String) -> Unit,
     onLoadTasks: () -> Unit,
@@ -280,7 +283,7 @@ private fun SecretaryTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item { MoneybotCard(ui, onLogin, onLogout) }
+        item { MoneybotCard(ui, onLogin, onRegister, onLogout) }
 
         if (!ui.account.loggedIn) {
             item {
@@ -573,6 +576,7 @@ private fun ModelCard(
 private fun MoneybotCard(
     ui: UiState,
     onLogin: (String, String, String) -> Unit,
+    onRegister: (String, String, String) -> Unit,
     onLogout: () -> Unit,
 ) {
     val account = ui.account
@@ -584,7 +588,7 @@ private fun MoneybotCard(
                 Text(account.baseUrl, style = MaterialTheme.typography.bodySmall)
                 TextButton(onClick = onLogout) { Text("ログアウト") }
             } else {
-                MoneybotLoginForm(ui, onLogin)
+                MoneybotLoginForm(ui, onLogin, onRegister)
             }
         }
     }
@@ -594,10 +598,11 @@ private fun MoneybotCard(
 private fun MoneybotLoginForm(
     ui: UiState,
     onLogin: (String, String, String) -> Unit,
+    onRegister: (String, String, String) -> Unit,
 ) {
     var baseUrl by rememberSaveable { mutableStateOf(ui.account.baseUrl) }
     var email by rememberSaveable { mutableStateOf("") }
-    var token by rememberSaveable { mutableStateOf("") }
+    var password by rememberSaveable { mutableStateOf("") }
 
     OutlinedTextField(
         value = baseUrl,
@@ -609,34 +614,38 @@ private fun MoneybotLoginForm(
     OutlinedTextField(
         value = email,
         onValueChange = { email = it },
-        label = { Text("アカウント (メール)") },
+        label = { Text("メールアドレス") },
         singleLine = true,
         modifier = Modifier.fillMaxWidth()
     )
     OutlinedTextField(
-        value = token,
-        onValueChange = { token = it },
-        label = { Text("トークン") },
+        value = password,
+        onValueChange = { password = it },
+        label = { Text("パスワード") },
         singleLine = true,
         visualTransformation = PasswordVisualTransformation(),
         modifier = Modifier.fillMaxWidth()
     )
-    Button(
-        onClick = { onLogin(baseUrl, email, token) },
-        enabled = !ui.loginInProgress,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        if (ui.loginInProgress) {
-            CircularProgressIndicator(
-                modifier = Modifier.height(18.dp),
-                strokeWidth = 2.dp
-            )
-        } else {
-            Text("ログイン")
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        Button(
+            onClick = { onLogin(baseUrl, email, password) },
+            enabled = !ui.loginInProgress,
+            modifier = Modifier.weight(1f)
+        ) {
+            if (ui.loginInProgress) {
+                CircularProgressIndicator(modifier = Modifier.height(18.dp), strokeWidth = 2.dp)
+            } else {
+                Text("ログイン")
+            }
         }
+        OutlinedButton(
+            onClick = { onRegister(baseUrl, email, password) },
+            enabled = !ui.loginInProgress,
+            modifier = Modifier.weight(1f)
+        ) { Text("新規登録") }
     }
     ui.loginError?.let {
-        Text("ログイン失敗: $it", color = MaterialTheme.colorScheme.error)
+        Text("認証失敗: $it", color = MaterialTheme.colorScheme.error)
     }
 }
 

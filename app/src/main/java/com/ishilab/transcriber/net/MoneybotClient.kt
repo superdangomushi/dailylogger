@@ -126,15 +126,31 @@ class MoneybotClient {
         }.getOrElse { Result.Error(it.message ?: "更新に失敗しました") }
     }
 
-    /** ログイン照合。アプリで入力したアカウント情報＋トークンがサーバーと一致するか確認する。 */
-    fun login(baseUrl: String, email: String, token: String): Result {
-        val url = endpoint(baseUrl, "/api/login")
-        val body = JSONObject().put("email", email).put("token", token).toString()
+    /** メール＋パスワードでログインし、成功時は API 用トークンを返す（保存して以降の送信に使う）。 */
+    fun login(baseUrl: String, email: String, password: String): kotlin.Result<String> =
+        postCredentials(baseUrl, "/api/login", email, password)
+
+    /** 新規登録し、成功時は API 用トークンを返す。 */
+    fun register(baseUrl: String, email: String, password: String): kotlin.Result<String> =
+        postCredentials(baseUrl, "/api/register", email, password)
+
+    /** /api/login・/api/register 共通。{email,password} を送り、返ってきた token を取り出す。 */
+    private fun postCredentials(
+        baseUrl: String, path: String, email: String, password: String,
+    ): kotlin.Result<String> {
+        val url = endpoint(baseUrl, path)
+        val body = JSONObject().put("email", email).put("password", password).toString()
         return runCatching {
             val conn = openPost(url, "application/json")
             conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            readResult(conn, onOk = "ログインしました")
-        }.getOrElse { Result.Error(it.message ?: "通信に失敗しました") }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) {
+                json.optString("token").ifBlank { throw RuntimeException("トークンが取得できませんでした") }
+            } else {
+                throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+            }
+        }
     }
 
     /** 文字起こしファイルを送信する。サーバー側で email＋トークンの一致を確認してから保存される。 */
