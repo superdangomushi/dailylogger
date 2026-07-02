@@ -90,6 +90,8 @@ function parseEvents(ics) {
           events.push({
             summary: unescapeText(cur.summary) || "(無題)",
             description: unescapeText(cur.description),
+            // Moodle はコース名を CATEGORIES に入れる（無ければ LOCATION を試す）。
+            course: unescapeText(cur.categories) || unescapeText(cur.location),
             at: parsed.at,
             dateOnly: parsed.dateOnly,
           });
@@ -105,6 +107,8 @@ function parseEvents(ics) {
       const params = keyPart.slice(name.length);
       if (name === "SUMMARY") cur.summary = value;
       else if (name === "DESCRIPTION") cur.description = value;
+      else if (name === "CATEGORIES") cur.categories = value;
+      else if (name === "LOCATION") cur.location = value;
       else if (name === "DTSTART") { cur.start = value; cur.startParams = params; }
     }
   }
@@ -119,10 +123,14 @@ async function syncUser(email, url) {
   for (const ev of events) {
     // 「提出」「due」「課題」を含むものは課題、それ以外は予定として登録。
     const isKadai = /(提出|課題|due|assignment|レポート|test|quiz|小テスト)/i.test(ev.summary);
+    // 授業名（CATEGORIES）が取れていれば内容の先頭に付ける。
+    const content = ev.course ? `[${ev.course}] ${ev.summary}` : ev.summary;
+    const details = [ev.course ? `授業: ${ev.course}` : "", ev.description]
+      .filter((s) => s).join(" / ") || "Moodle";
     await db.addTask(email, {
       type: isKadai ? "kadai" : "yotei",
-      content: ev.summary,
-      details: ev.description || "Moodle",
+      content,
+      details,
       deadline_at: ev.at,
       date_only: ev.dateOnly,
     });
@@ -150,14 +158,17 @@ async function syncAll() {
   }
 }
 
-// 定期同期を開始（既定 6 時間ごと）。
+// 定期同期を開始（既定 72 時間＝3日ごと。重いので既定は控えめ）。0 で自動同期無効（手動のみ）。
 function start() {
-  const hours = Number(process.env.MOODLE_SYNC_INTERVAL_HOURS || 6);
-  if (!(hours > 0)) return;
+  const hours = Number(process.env.MOODLE_SYNC_INTERVAL_HOURS ?? 72);
+  if (!(hours > 0)) {
+    console.log("Moodle 自動同期は無効（手動同期のみ）");
+    return;
+  }
   const ms = hours * 3600 * 1000;
   setTimeout(function tick() {
     syncAll().finally(() => setTimeout(tick, ms));
-  }, 30_000); // 起動30秒後に初回
+  }, 60_000); // 起動1分後に初回
   console.log(`Moodle 定期同期: ${hours} 時間ごと`);
 }
 

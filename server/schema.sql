@@ -72,9 +72,58 @@ CREATE TABLE IF NOT EXISTS users (
   token         CHAR(48)     NOT NULL,
   moodle_ical_url VARCHAR(1024) NULL,
   google_email  VARCHAR(255) NULL,
+  -- Waseda アカウント（時間割スクレイパ用）。パスワードは AES-256-GCM 暗号化（iv:tag:cipher の hex）。
+  waseda_user   VARCHAR(255) NULL,
+  waseda_password_enc VARCHAR(1024) NULL,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_token (token)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 履修時間割（科目登録から取得）。曜日×時限×科目名×教室。
+CREATE TABLE IF NOT EXISTS courses (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  email      VARCHAR(255) NOT NULL,
+  term       VARCHAR(32)  NULL,
+  day        VARCHAR(8)   NULL,
+  period     INT          NULL,
+  name       VARCHAR(255) NOT NULL,
+  room       VARCHAR(255) NULL,
+  start_time VARCHAR(8)   NULL,
+  end_time   VARCHAR(8)   NULL,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_courses_email (email)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 資料ファイル（PDF/TXT等）の AI 要約。
+CREATE TABLE IF NOT EXISTS documents (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  email       VARCHAR(255) NOT NULL,
+  name        VARCHAR(512) NOT NULL,
+  mime        VARCHAR(128) NULL,
+  summary     LONGTEXT     NOT NULL,
+  created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_doc (email, name)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- 端末からアップロードされた音声のサーバー側文字起こしジョブ。
+-- status: 'queued'(待機) → 'processing'(処理中) → 'done'(完了) | 'error'(失敗)
+CREATE TABLE IF NOT EXISTS audio_jobs (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  email         VARCHAR(255) NOT NULL,
+  filename      VARCHAR(255) NOT NULL,
+  stored_path   VARCHAR(1024) NOT NULL,
+  mime          VARCHAR(128) NULL,
+  size_bytes    BIGINT       NOT NULL DEFAULT 0,
+  status        VARCHAR(16)  NOT NULL DEFAULT 'queued',
+  error         TEXT         NULL,
+  -- 文字起こし完了後に作られた transcripts 行への参照。
+  transcript_id INT          NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_audio_email (email, created_at),
+  KEY idx_audio_status (status)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- 送信済みリマインド通知の記録（履歴・二重送信防止の補助）。

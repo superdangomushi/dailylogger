@@ -93,6 +93,22 @@ class AiHelperClient {
         }
     }
 
+    /** 指定日(yyyy-MM-dd)の要約を取得する（未生成なら空文字）。 */
+    fun fetchDaySummary(baseUrl: String, email: String, token: String, day: String): kotlin.Result<String> {
+        val path = "/api/summary/$day?email=${enc(email)}&token=${enc(token)}"
+        val url = endpoint(baseUrl, path)
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 15_000; readTimeout = 20_000
+                setRequestProperty("Accept", "application/json")
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) json.optString("summary")
+            else throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+        }
+    }
+
     /** 今日の要約をサーバー(Gemini)でいま生成し直す。生成された本文を返す。 */
     fun generateSummary(baseUrl: String, email: String, token: String): kotlin.Result<String> {
         val url = endpoint(baseUrl, "/api/summary/today/generate")
@@ -166,6 +182,40 @@ class AiHelperClient {
         }
     }
 
+    /** サーバーに保存済みの Waseda アカウント情報（ID と、パスワード保存の有無）を取得する。 */
+    fun fetchWaseda(baseUrl: String, email: String, token: String): kotlin.Result<Pair<String, Boolean>> {
+        val url = endpoint(baseUrl, "/api/waseda?email=${enc(email)}&token=${enc(token)}")
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 15_000; readTimeout = 20_000
+                setRequestProperty("Accept", "application/json")
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) {
+                json.optString("wasedaUser") to json.optBoolean("hasPassword")
+            } else {
+                throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+            }
+        }
+    }
+
+    /** Waseda の ID・パスワードをサーバーに保存する（パスワード空なら ID のみ更新）。 */
+    fun saveWaseda(
+        baseUrl: String, email: String, token: String,
+        wasedaUser: String, wasedaPassword: String,
+    ): Result {
+        val url = endpoint(baseUrl, "/api/waseda")
+        val body = JSONObject().put("email", email).put("token", token)
+            .put("wasedaUser", wasedaUser).put("wasedaPassword", wasedaPassword)
+            .toString()
+        return runCatching {
+            val conn = openPost(url, "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            readResult(conn, onOk = "保存しました")
+        }.getOrElse { Result.Error(it.message ?: "保存に失敗しました") }
+    }
+
     /** サインインした Google アカウントをサーバーのアカウントに紐付ける。 */
     fun linkGoogle(baseUrl: String, email: String, token: String, googleEmail: String): Result {
         val url = endpoint(baseUrl, "/api/google-link")
@@ -218,6 +268,59 @@ class AiHelperClient {
             conn.outputStream.use { out -> file.inputStream().use { it.copyTo(out) } }
             readResult(conn, onOk = "${file.name} を送信しました")
         }.getOrElse { Result.Error(it.message ?: "送信に失敗しました") }
+    }
+
+    /**
+     * 録音した PCM16(16kHz/mono) の区間ファイルを WAV としてサーバーへアップロードし、
+     * サーバー側の文字起こしジョブに登録する。成功時はジョブ ID を返す。
+     * WAV ヘッダ(44バイト)＋PCM をストリーミング送信するので RAM を圧迫しない。
+     */
+    fun uploadAudioPcm(
+        baseUrl: String, email: String, token: String,
+        pcmFile: File, uploadName: String, sampleRate: Int,
+    ): kotlin.Result<Long> {
+        if (!pcmFile.exists()) return kotlin.Result.failure(RuntimeException("音声ファイルが見つかりません"))
+        val url = endpoint(baseUrl, "/api/audio")
+        val pcmBytes = pcmFile.length()
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 20_000
+                readTimeout = 120_000
+                setFixedLengthStreamingMode(44L + pcmBytes)
+                setRequestProperty("Content-Type", "audio/wav")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Authorization", "Bearer $token")
+                setRequestProperty("X-Account-Email", email)
+                setRequestProperty("X-Filename", uploadName)
+            }
+            conn.outputStream.use { out ->
+                out.write(wavHeader(pcmBytes, sampleRate))
+                pcmFile.inputStream().use { it.copyTo(out, 1 shl 16) }
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) json.optLong("jobId")
+            else throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+        }
+    }
+
+    /** PCM16/mono 用の WAV(RIFF) ヘッダ 44 バイトを組み立てる。 */
+    private fun wavHeader(pcmBytes: Long, sampleRate: Int): ByteArray {
+        val byteRate = sampleRate * 2
+        val dataLen = pcmBytes.toInt()
+        val buf = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        buf.put("RIFF".toByteArray()); buf.putInt(36 + dataLen); buf.put("WAVE".toByteArray())
+        buf.put("fmt ".toByteArray()); buf.putInt(16)
+        buf.putShort(1)                 // PCM
+        buf.putShort(1)                 // mono
+        buf.putInt(sampleRate)
+        buf.putInt(byteRate)
+        buf.putShort(2)                 // block align
+        buf.putShort(16)                // bits per sample
+        buf.put("data".toByteArray()); buf.putInt(dataLen)
+        return buf.array()
     }
 
     /**

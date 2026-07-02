@@ -25,6 +25,11 @@ class AccountStore(context: Context) {
     val loggedIn: Boolean
         get() = prefs.getBoolean(KEY_LOGGED_IN, false)
 
+    /** true なら端末の Whisper を使わず、録音音声をサーバーへアップロードして文字起こしする。 */
+    var serverTranscribe: Boolean
+        get() = prefs.getBoolean(KEY_SERVER_TRANSCRIBE, false)
+        set(value) = prefs.edit().putBoolean(KEY_SERVER_TRANSCRIBE, value).apply()
+
     /** ログイン成功時に呼ぶ。以後の送信で使う認証情報を確定させる。 */
     fun save(baseUrl: String, email: String, token: String) {
         prefs.edit()
@@ -48,5 +53,6 @@ class AccountStore(context: Context) {
         const val KEY_EMAIL = "email"
         const val KEY_TOKEN = "token"
         const val KEY_LOGGED_IN = "logged_in"
+        const val KEY_SERVER_TRANSCRIBE = "server_transcribe"
     }
 }

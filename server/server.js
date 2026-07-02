@@ -40,6 +40,7 @@ const line = require("./line");
 const summary = require("./summary");
 const reminders = require("./reminders");
 const moodle = require("./moodle");
+const audio = require("./audio");
 
 const PORT = process.env.PORT || 3000;
 const ACCOUNTS_FILE = path.join(__dirname, "accounts.json");
@@ -50,6 +51,10 @@ const app = express();
 
 app.use(express.json());
 app.use(express.text({ type: "text/plain", limit: "10mb" }));
+// 資料アップロード（PDF 等）はバイナリで受ける。
+app.use(express.raw({ type: ["application/pdf", "application/octet-stream"], limit: "25mb" }));
+// 音声アップロード（1時間の WAV で 100MB を超えるため上限を大きく取る）。
+app.use(express.raw({ type: ["audio/*"], limit: "300mb" }));
 
 // accounts.json はリクエストのたびに読み直す（編集してすぐ反映できるように）。
 function loadAccounts() {
@@ -71,6 +76,38 @@ function genSalt() {
 }
 function genToken() {
   return crypto.randomBytes(24).toString("hex"); // 48 hex chars
+}
+
+// ---- Waseda パスワード等の可逆暗号化（AES-256-GCM） ----
+// スクレイパがログインに使うため平文へ戻せる必要がある。鍵は CRED_ENC_KEY（64桁hex）か、
+// 無ければ初回起動時に .cred-key へ自動生成して以降使い回す。
+const CRED_KEY = (() => {
+  const env = (process.env.CRED_ENC_KEY || "").trim();
+  if (/^[0-9a-fA-F]{64}$/.test(env)) return Buffer.from(env, "hex");
+  const keyFile = path.join(__dirname, ".cred-key");
+  try {
+    const s = fs.readFileSync(keyFile, "utf8").trim();
+    if (/^[0-9a-fA-F]{64}$/.test(s)) return Buffer.from(s, "hex");
+  } catch (_e) { /* 初回はファイルなし */ }
+  const key = crypto.randomBytes(32);
+  fs.writeFileSync(keyFile, key.toString("hex"), { mode: 0o600 });
+  console.log(`資格情報の暗号鍵を生成しました: ${keyFile}`);
+  return key;
+})();
+
+function encryptCred(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", CRED_KEY, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
+  return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${enc.toString("hex")}`;
+}
+
+function decryptCred(stored) {
+  const [ivHex, tagHex, encHex] = String(stored || "").split(":");
+  if (!ivHex || !tagHex || !encHex) throw new Error("暗号データの形式が不正です");
+  const decipher = crypto.createDecipheriv("aes-256-gcm", CRED_KEY, Buffer.from(ivHex, "hex"));
+  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
+  return Buffer.concat([decipher.update(Buffer.from(encHex, "hex")), decipher.final()]).toString("utf8");
 }
 
 // email + token を accounts.json → DB の順で照合し、アカウント相当を返す（非同期）。
@@ -190,6 +227,77 @@ app.post("/api/change-password", async (req, res) => {
   }
 });
 
+// 履修時間割の取得・登録（スクレイパやアプリから）。滅多に変わらないので全入れ替え。
+app.get("/api/courses", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    res.json({ ok: true, courses: await db.listCourses(account.email) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/courses", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const courses = Array.isArray(req.body?.courses) ? req.body.courses : null;
+  if (!courses) return res.status(400).json({ ok: false, error: "courses 配列が必要です" });
+  try {
+    await db.replaceCourses(account.email, courses);
+    res.json({ ok: true, count: courses.length });
+  } catch (e) {
+    console.error("時間割の保存に失敗:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 資料ファイル（PDF/TXT）を受け取り、その場で Gemini 要約して DB に保存する。
+// Content-Type が text/plain ならテキスト、application/pdf 等ならバイナリで受ける。
+app.post("/api/files", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  if (!gemini.isConfigured()) {
+    return res.status(503).json({ ok: false, error: "Gemini が未設定です（GEMINI_API_KEY）" });
+  }
+  const rawName = req.get("X-Filename") || `document-${Date.now()}`;
+  const name = path.basename(rawName).slice(0, 500);
+  const ctype = (req.get("Content-Type") || "").toLowerCase();
+  try {
+    let summary;
+    if (ctype.startsWith("text/plain")) {
+      const text = typeof req.body === "string" ? req.body : "";
+      if (!text.trim()) return res.status(400).json({ ok: false, error: "本文が空です" });
+      summary = await gemini.summarizeDocument({ name, mimeType: "text/plain", text });
+    } else if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+      // PDF はそのまま Gemini に渡す（inlineData）。
+      const mimeType = ctype.startsWith("application/pdf") ? "application/pdf" : "application/pdf";
+      summary = await gemini.summarizeDocument({
+        name, mimeType, base64: req.body.toString("base64"),
+      });
+    } else {
+      return res.status(400).json({ ok: false, error: "ファイル本文がありません（PDF か .txt を送ってください）" });
+    }
+    await db.saveDocument(account.email, name, ctype, summary);
+    console.log(`資料要約: ${account.email} -> ${name}`);
+    res.json({ ok: true, name, summary });
+  } catch (e) {
+    console.error("資料要約に失敗:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get("/api/files", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const docs = await db.listDocuments(account.email, 100);
+    res.json({ ok: true, documents: docs });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Google アカウントの紐付け（端末でサインインした Google メールをアカウントに記録）。
 app.post("/api/google-link", async (req, res) => {
   const account = await authFromReq(req);
@@ -230,6 +338,64 @@ app.post("/api/moodle", async (req, res) => {
   }
 });
 
+// Waseda アカウント連携: 各ユーザーが自分の Waseda ID・パスワードを保存する。
+// GET はパスワード本体を返さず「保存済みかどうか」だけ返す。
+app.get("/api/waseda", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const row = await db.getWasedaCreds(account.email);
+    res.json({
+      ok: true,
+      wasedaUser: row?.waseda_user || "",
+      hasPassword: Boolean(row?.waseda_password_enc),
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/waseda", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const wasedaUser = String(req.body?.wasedaUser || "").trim();
+  const wasedaPassword = String(req.body?.wasedaPassword || "");
+  try {
+    if (!wasedaUser) {
+      // 空で保存＝連携解除。
+      await db.setWasedaCreds(account.email, null, null);
+      return res.json({ ok: true, cleared: true });
+    }
+    if (!wasedaPassword) {
+      // ID のみ更新（パスワードは既存を維持）。
+      const row = await db.getWasedaCreds(account.email);
+      await db.setWasedaCreds(account.email, wasedaUser, row?.waseda_password_enc || null);
+    } else {
+      await db.setWasedaCreds(account.email, wasedaUser, encryptCred(wasedaPassword));
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Waseda アカウント保存に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "保存に失敗しました" });
+  }
+});
+
+// スクレイパ用: 本人のトークンで認証し、復号済みの資格情報を返す。
+app.get("/api/waseda/credentials", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const row = await db.getWasedaCreds(account.email);
+    if (!row?.waseda_user || !row?.waseda_password_enc) {
+      return res.status(404).json({ ok: false, error: "Waseda アカウントが未登録です" });
+    }
+    res.json({ ok: true, wasedaUser: row.waseda_user, wasedaPassword: decryptCred(row.waseda_password_enc) });
+  } catch (e) {
+    console.error("Waseda 資格情報の取得に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "取得に失敗しました" });
+  }
+});
+
 app.post("/api/moodle/sync", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
@@ -240,6 +406,38 @@ app.post("/api/moodle/sync", async (req, res) => {
     res.json({ ok: true, imported });
   } catch (e) {
     console.error(`Moodle 同期に失敗 (${account.email}):`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 音声ファイルの受信 → ジョブ登録（文字起こしはサーバー側ワーカーが非同期で実行）。
+// 端末での Whisper 処理の代わりに、録音した WAV をそのまま送れる。
+app.post("/api/audio", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    return res.status(400).json({ ok: false, error: "音声データがありません（audio/wav 等で送ってください）" });
+  }
+  const rawName = req.get("X-Filename") || `audio-${Date.now()}.wav`;
+  const mime = (req.get("Content-Type") || "audio/wav").split(";")[0];
+  try {
+    const jobId = await audio.enqueue(account.email, rawName, req.body, mime);
+    console.log(`音声受信: ${account.email} -> ${rawName} (${req.body.length} bytes) job#${jobId}`);
+    res.json({ ok: true, jobId, queued: true });
+  } catch (e) {
+    console.error("音声の受付に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "音声の保存に失敗しました" });
+  }
+});
+
+// 音声ジョブの処理状況一覧（queued/processing/done/error）。
+app.get("/api/audio/jobs", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const jobs = await db.listAudioJobs(account.email, Number(req.query.limit) || 30);
+    res.json({ ok: true, jobs });
+  } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -311,9 +509,15 @@ app.post("/api/ask", async (req, res) => {
   try {
     const tasks = await db.listUpcomingTasks(account.email, { includeDone: true, limit: 100 });
     const summaries = await db.listDailySummaries(account.email, 5);
+    const courses = await db.listCourses(account.email);
     // アプリが送ってきた端末側カレンダー（Google等）も渡す。
     const calendar = Array.isArray(req.body?.calendar) ? req.body.calendar.slice(0, 100) : [];
-    const result = await gemini.ask(question, { tasks, summaries, calendar });
+    // 授業の質問にも答えられるよう、資料要約と質問に関連する文字起こし抜粋も渡す。
+    const documents = await db.listDocuments(account.email, 20);
+    const snippets = await db.searchTranscriptSnippets(
+      account.email, extractKeywords(question, courses)
+    );
+    const result = await gemini.ask(question, { tasks, summaries, calendar, courses, documents, snippets });
 
     // Gemini が返した操作を実行する。
     const applied = [];
@@ -341,6 +545,25 @@ app.post("/api/ask", async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// 質問文から文字起こし検索用のキーワードを取り出す。
+// 履修科目名に一致する語を最優先し、続けて名詞らしい 2 文字以上の語を拾う。
+function extractKeywords(question, courses) {
+  const keywords = [];
+  for (const c of courses || []) {
+    const name = String(c.name || "").trim();
+    if (name && question.includes(name)) keywords.push(name);
+  }
+  // 記号・助詞的な1文字語を除き、空白/句読点区切りの語を追加。
+  const words = question
+    .split(/[\s、。．，,.!?！？「」『』（）()]+/)
+    .map((w) => w.replace(/(について|とは|って|ですか|でしたか|教えて|何|なに)$/g, ""))
+    .filter((w) => w.length >= 2);
+  for (const w of words) {
+    if (!keywords.includes(w)) keywords.push(w);
+  }
+  return keywords.slice(0, 8);
+}
 
 // "#3" やタスク内容の一部からタスクを特定する。
 function resolveTaskTarget(tasks, target) {
@@ -514,11 +737,15 @@ function itemsToCsv(items) {
 
 function sendCsv(res, filename, items) {
   res.setHeader("Content-Type", "text/csv; charset=utf-8");
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
-  );
+  res.setHeader("Content-Disposition", contentDisposition(filename));
   res.send(itemsToCsv(items));
+}
+
+// filename に日本語等の非ASCIIが含まれるとヘッダ値として不正になりサーバーが落ちるため、
+// filename= には ASCII 化した名前、filename*= に UTF-8 エンコード名を入れる（RFC 5987）。
+function contentDisposition(filename) {
+  const ascii = String(filename).replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_");
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 }
 
 app.get("/kadai/:id.csv", async (req, res) => serveAnalysisCsv(req, res, "kadai", "課題"));
@@ -592,10 +819,7 @@ app.get("/download/:id", async (req, res) => {
   }
   if (!row) return res.status(404).type("text/plain").send("見つかりません");
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename="${row.filename}"; filename*=UTF-8''${encodeURIComponent(row.filename)}`
-  );
+  res.setHeader("Content-Disposition", contentDisposition(row.filename));
   res.send(row.content);
 });
 
@@ -838,6 +1062,22 @@ function renderDashboard(tableRows) {
       </section>
 
       <section class="card panel" data-panel="files">
+        <h2>資料の要約（PDF / TXT）</h2>
+        <p class="muted">PDF か テキストをアップロードすると、その場で AI が要約して保存します。</p>
+        <div class="row">
+          <input type="file" id="docFile" accept=".pdf,.txt,application/pdf,text/plain">
+          <button onclick="uploadDoc()">要約する</button>
+          <span id="docState" class="muted"></span>
+        </div>
+        <div id="docList" style="margin-top:.8rem"></div>
+        <hr>
+        <h2>音声の文字起こし状況（サーバー処理）</h2>
+        <p class="muted">端末からアップロードされた音声はサーバーで順番に文字起こしされます。</p>
+        <div class="row" style="margin-bottom:.5rem">
+          <button class="ghost small" onclick="loadAudioJobs()">更新</button>
+        </div>
+        <div id="audioJobs"><p class="muted">読み込み中…</p></div>
+        <hr>
         <h2>受信した文字起こしファイル</h2>
         <table>
           <thead><tr><th>アカウント</th><th>ファイル名</th><th>文字数</th><th>更新</th><th></th><th>課題/予定</th></tr></thead>
@@ -867,6 +1107,19 @@ function renderDashboard(tableRows) {
           <button onclick="saveMoodle()">保存</button>
           <button class="ghost" onclick="syncMoodle()">今すぐ同期</button>
           <span id="moodleState" class="muted"></span>
+        </div>
+        <hr>
+        <h3 style="font-size:.95rem; margin:.2rem 0 .6rem">Waseda アカウント連携（時間割の取り込み）</h3>
+        <p class="muted" style="margin:.2rem 0 .5rem">
+          MyWaseda のログイン情報を保存すると、科目登録（時間割）を自動取得できます。
+          パスワードは暗号化して保存され、時間割取得のログインにのみ使われます。
+        </p>
+        <input id="wasedaUser" placeholder="Waseda ID（例: xxxx@akane.waseda.jp）" autocomplete="off" style="margin-bottom:.5rem">
+        <input id="wasedaPw" type="password" placeholder="Waseda パスワード" autocomplete="new-password">
+        <div class="row" style="margin-top:.6rem">
+          <button onclick="saveWaseda()">保存</button>
+          <button class="ghost" onclick="clearWaseda()">連携解除</button>
+          <span id="wasedaState" class="muted"></span>
         </div>
         <hr>
         <button class="ghost" onclick="logout()">ログアウト</button>
@@ -936,7 +1189,84 @@ function renderDashboard(tableRows) {
       if(j.ok){ $('pwState').textContent='✓ 変更しました'; $('curpw').value=$('newpw').value=''; }
       else $('pwState').textContent = '✗ ' + (j.error||'変更失敗');
     }
-    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); }
+    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioJobs(); }
+
+    // ---- 音声ジョブ状況 ----
+    const AUDIO_STATUS = { queued:'待機中', processing:'処理中', done:'完了', error:'失敗' };
+    async function loadAudioJobs(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/audio/jobs',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok){ $('audioJobs').innerHTML='<p class="muted">'+escapeHtml(j.error||'取得失敗')+'</p>'; return; }
+        if(!j.jobs.length){ $('audioJobs').innerHTML='<p class="muted">音声のアップロードはまだありません。</p>'; return; }
+        const rows = j.jobs.map(a => '<tr><td>'+escapeHtml(a.filename)+'</td>'+
+          '<td class="num">'+Math.round((a.size_bytes||0)/1024/1024*10)/10+' MB</td>'+
+          '<td>'+(AUDIO_STATUS[a.status]||a.status)+(a.error?'<div class="muted">'+escapeHtml(a.error)+'</div>':'')+'</td>'+
+          '<td>'+new Date(a.updated_at).toLocaleString('ja-JP')+'</td></tr>').join('');
+        $('audioJobs').innerHTML = '<table><thead><tr><th>ファイル</th><th>サイズ</th><th>状態</th><th>更新</th></tr></thead><tbody>'+rows+'</tbody></table>';
+        // 未完了ジョブがあれば少し待って自動更新。
+        if(j.jobs.some(a => a.status==='queued'||a.status==='processing')) setTimeout(loadAudioJobs, 15000);
+      } catch(e){}
+    }
+
+    // ---- Waseda アカウント連携 ----
+    async function loadWaseda(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/waseda',{headers:headers()});
+        const j = await r.json();
+        if(j.ok){
+          $('wasedaUser').value = j.wasedaUser || '';
+          $('wasedaState').textContent = j.hasPassword ? '登録済み（パスワード保存済み）' : '';
+        }
+      } catch(e){}
+    }
+    async function saveWaseda(){
+      const wasedaUser = $('wasedaUser').value.trim(), wasedaPassword = $('wasedaPw').value;
+      if(!wasedaUser){ $('wasedaState').textContent='Waseda ID を入力してください'; return; }
+      const r = await fetch('/api/waseda',{method:'POST',headers:headers(),
+        body:JSON.stringify({wasedaUser, wasedaPassword})});
+      const j = await r.json();
+      if(j.ok){ $('wasedaState').textContent='✓ 保存しました'; $('wasedaPw').value=''; }
+      else $('wasedaState').textContent='✗ '+(j.error||'保存失敗');
+    }
+    async function clearWaseda(){
+      const r = await fetch('/api/waseda',{method:'POST',headers:headers(),
+        body:JSON.stringify({wasedaUser:'', wasedaPassword:''})});
+      const j = await r.json();
+      if(j.ok){ $('wasedaUser').value=''; $('wasedaPw').value=''; $('wasedaState').textContent='✓ 解除しました'; }
+      else $('wasedaState').textContent='✗ '+(j.error||'解除失敗');
+    }
+
+    // ---- 資料要約 ----
+    async function loadDocs(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/files',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok || !j.documents.length){ $('docList').innerHTML=''; return; }
+        $('docList').innerHTML = j.documents.map(d =>
+          '<details style="margin:.3rem 0"><summary>'+escapeHtml(d.name)+'</summary>'+
+          '<div style="white-space:pre-wrap;line-height:1.6;margin-top:.4rem">'+escapeHtml(d.summary)+'</div></details>'
+        ).join('');
+      } catch(e){}
+    }
+    async function uploadDoc(){
+      const f = $('docFile').files[0];
+      if(!f){ $('docState').textContent='ファイルを選んでください'; return; }
+      $('docState').textContent='要約中…';
+      try {
+        const isTxt = /\.txt$/i.test(f.name) || f.type==='text/plain';
+        const h = { 'X-Account-Email': auth.email||'', 'Authorization':'Bearer '+(auth.token||''),
+                    'X-Filename': f.name, 'Content-Type': isTxt ? 'text/plain' : 'application/pdf' };
+        const body = isTxt ? await f.text() : await f.arrayBuffer();
+        const r = await fetch('/api/files',{method:'POST',headers:h,body});
+        const j = await r.json();
+        if(j.ok){ $('docState').textContent='✓ 要約しました'; $('docFile').value=''; loadDocs(); }
+        else $('docState').textContent='✗ '+(j.error||'失敗');
+      } catch(e){ $('docState').textContent='✗ 通信エラー'; }
+    }
 
     // ---- Moodle 連携 ----
     async function loadMoodle(){
@@ -989,7 +1319,7 @@ function renderDashboard(tableRows) {
         const r = await fetch('/api/ask',{method:'POST',headers:headers(),body:JSON.stringify({question:q})});
         const j = await r.json();
         bubble(j.ok ? j.reply : ('エラー: '+(j.error||'')), 'bot');
-        if(j.ok && j.applied && j.applied.length){ loadTasks(); }
+        if(j.ok){ loadTasks(); }
       }catch(e){ bubble('通信エラー','bot'); }
     }
 
@@ -1138,6 +1468,8 @@ async function main() {
   reminders.start(resolveLineTarget);
   // Moodle の定期同期を開始。
   moodle.start();
+  // 音声文字起こしワーカーを開始。
+  audio.start();
 
   app.listen(PORT, () => {
     console.log(`AIHelper listening on http://localhost:${PORT}`);

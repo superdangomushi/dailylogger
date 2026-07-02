@@ -11,6 +11,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,10 @@ import androidx.compose.runtime.setValue
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.ZoneId
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -116,12 +121,13 @@ class MainActivity : ComponentActivity() {
                     }
                     val googleLauncher = rememberLauncherForActivityResult(
                         ActivityResultContracts.StartActivityForResult()
-                    ) { viewModel.refreshGoogle() }
+                    ) { result -> viewModel.onGoogleSignInResult(result.data) }
                     MainScreen(
                         ui = ui,
                         service = service,
                         onDownload = viewModel::download,
                         onSelectModel = viewModel::selectModel,
+                        onSetServerTranscribe = viewModel::setServerTranscribe,
                         onStart = { AudioCaptureService.start(this) },
                         onStop = { AudioCaptureService.stop(this) },
                         onRefresh = viewModel::refresh,
@@ -145,6 +151,9 @@ class MainActivity : ComponentActivity() {
                         onLoadMoodle = viewModel::loadMoodle,
                         onSaveMoodleUrl = viewModel::saveMoodleUrl,
                         onSyncMoodle = viewModel::syncMoodle,
+                        onLoadWaseda = viewModel::loadWaseda,
+                        onSaveWaseda = viewModel::saveWaseda,
+                        onLoadDaySummary = viewModel::loadDaySummary,
                     )
                 }
             }
@@ -176,6 +185,7 @@ private fun MainScreen(
     service: ServiceState,
     onDownload: (WhisperModel) -> Unit,
     onSelectModel: (WhisperModel) -> Unit,
+    onSetServerTranscribe: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
@@ -196,6 +206,9 @@ private fun MainScreen(
     onLoadMoodle: () -> Unit,
     onSaveMoodleUrl: (String) -> Unit,
     onSyncMoodle: () -> Unit,
+    onLoadWaseda: () -> Unit,
+    onSaveWaseda: (String, String) -> Unit,
+    onLoadDaySummary: (String) -> Unit,
 ) {
     var tab by rememberSaveable { mutableStateOf(0) }
     Box(modifier = Modifier.fillMaxSize()) {
@@ -210,16 +223,18 @@ private fun MainScreen(
                 TabRow(selectedTabIndex = tab) {
                     Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("録音") })
                     Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("記録") })
-                    Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("予定・秘書") })
+                    Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("予定") })
+                    Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("秘書") })
                 }
                 when (tab) {
-                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onStart, onStop)
+                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onSetServerTranscribe, onStart, onStop)
                     1 -> RecordsTab(ui, onRefresh, onSend)
+                    2 -> CalendarTab(ui, onLoadDaySummary)
                     else -> SecretaryTab(
                         ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
                         onLoadSummary, onGenerateSummary,
                         onConnectGoogle, onDisconnectGoogle, onLoadCalendar, onAddToCalendar,
-                        onLoadMoodle, onSaveMoodleUrl, onSyncMoodle
+                        onLoadMoodle, onSaveMoodleUrl, onSyncMoodle, onLoadWaseda, onSaveWaseda
                     )
                 }
             }
@@ -265,6 +280,7 @@ private fun RecordingTab(
     service: ServiceState,
     onDownload: (WhisperModel) -> Unit,
     onSelectModel: (WhisperModel) -> Unit,
+    onSetServerTranscribe: (Boolean) -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -277,9 +293,13 @@ private fun RecordingTab(
     ) {
         item { StatusCard(service) }
 
-        item { ModelCard(ui, onDownload, onSelectModel) }
+        item { TranscribeModeCard(ui, onSetServerTranscribe) }
 
-        if (ui.anyModelReady) {
+        if (!ui.serverTranscribe) {
+            item { ModelCard(ui, onDownload, onSelectModel) }
+        }
+
+        if (ui.anyModelReady || ui.serverTranscribe) {
             item { ControlRow(service, onStart, onStop) }
         }
 
@@ -438,6 +458,145 @@ private fun TranscriptDetail(
     }
 }
 
+private data class CalItem(val date: LocalDate, val time: String, val title: String)
+
+/** 月カレンダー。日付をタップするとその日の予定・時間・（あれば）要約を表示。 */
+@Composable
+private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
+    var ymStr by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
+    var selectedStr by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
+    val ym = runCatching { YearMonth.parse(ymStr) }.getOrDefault(YearMonth.now())
+    val selected = runCatching { LocalDate.parse(selectedStr) }.getOrDefault(LocalDate.now())
+
+    // 課題・予定 + Google カレンダー予定を日付ごとにまとめる。
+    val byDate = remember(ui.tasks, ui.calendarEvents) {
+        val list = mutableListOf<CalItem>()
+        ui.tasks.forEach { t ->
+            val dl = t.deadline
+            if (!dl.isNullOrBlank()) {
+                val d = runCatching { LocalDate.parse(dl.take(10)) }.getOrNull()
+                if (d != null) {
+                    val norm = dl.replace('T', ' ')
+                    val time = if (!t.dateOnly && norm.length >= 16) norm.substring(11, 16) else ""
+                    val label = if (t.type == "yotei") "予定" else "課題"
+                    list.add(CalItem(d, time, "[$label] ${t.content}"))
+                }
+            }
+        }
+        ui.calendarEvents.forEach { ev ->
+            if (ev.startMillis > 0) {
+                val d = Instant.ofEpochMilli(ev.startMillis).atZone(ZoneId.systemDefault()).toLocalDate()
+                val norm = ev.whenText.replace('T', ' ')
+                val time = if (norm.length >= 16) norm.substring(11, 16) else ""
+                list.add(CalItem(d, time, "[カレンダー] ${ev.title}"))
+            }
+        }
+        list.groupBy { it.date }
+    }
+
+    LaunchedEffect(selectedStr) { onLoadDaySummary(selectedStr) }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = { ymStr = ym.minusMonths(1).toString() }) { Text("‹ 前月") }
+                Text("${ym.year}年${ym.monthValue}月", style = MaterialTheme.typography.titleMedium)
+                TextButton(onClick = { ymStr = ym.plusMonths(1).toString() }) { Text("翌月 ›") }
+            }
+        }
+        item {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                listOf("日", "月", "火", "水", "木", "金", "土").forEach {
+                    Text(
+                        it, modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+        // 週ごとの行
+        val lead = ym.atDay(1).dayOfWeek.value % 7 // 月=1..日=7 → 日=0 起点
+        val cells = buildList<LocalDate?> {
+            repeat(lead) { add(null) }
+            for (d in 1..ym.lengthOfMonth()) add(ym.atDay(d))
+            while (size % 7 != 0) add(null)
+        }
+        items(cells.chunked(7)) { week ->
+            Row(modifier = Modifier.fillMaxWidth()) {
+                week.forEach { date ->
+                    if (date == null) {
+                        Box(modifier = Modifier.weight(1f).height(44.dp))
+                    } else {
+                        val isSel = date == selected
+                        val has = byDate.containsKey(date)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f).height(44.dp).padding(2.dp)
+                                .background(
+                                    if (isSel) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { selectedStr = date.toString() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text("${date.dayOfMonth}", style = MaterialTheme.typography.bodyMedium)
+                                if (has) {
+                                    Box(
+                                        modifier = Modifier.size(5.dp).background(
+                                            MaterialTheme.colorScheme.primary, RoundedCornerShape(50)
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // 選択日の詳細
+        item {
+            Text(
+                "${selected.monthValue}月${selected.dayOfMonth}日 の予定",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        val dayItems = (byDate[selected] ?: emptyList()).sortedBy { it.time.ifBlank { "99:99" } }
+        if (dayItems.isEmpty()) {
+            item { Text("予定はありません。", style = MaterialTheme.typography.bodySmall) }
+        } else {
+            items(dayItems) { it2 ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(it2.time.ifBlank { "終日" }, style = MaterialTheme.typography.labelLarge)
+                        Text(it2.title, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+        // その日の要約（あれば）
+        if (ui.daySummaryDay == selectedStr && !ui.daySummary.isNullOrBlank()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("この日の要約", style = MaterialTheme.typography.titleSmall)
+                        Text(ui.daySummary!!, style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** AIHelper 連携（ログイン）・予定/課題の確認・秘書チャットをまとめたタブ。 */
 @Composable
 private fun SecretaryTab(
@@ -458,6 +617,8 @@ private fun SecretaryTab(
     onLoadMoodle: () -> Unit,
     onSaveMoodleUrl: (String) -> Unit,
     onSyncMoodle: () -> Unit,
+    onLoadWaseda: () -> Unit,
+    onSaveWaseda: (String, String) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -482,6 +643,7 @@ private fun SecretaryTab(
 
         // ---- 連携（アカウントに紐付く） ----
         item { MoodleCard(ui, onLoadMoodle, onSaveMoodleUrl, onSyncMoodle) }
+        item { WasedaCard(ui, onLoadWaseda, onSaveWaseda) }
 
         // ---- 今日の要約 ----
         item { SummaryCard(ui, onLoadSummary, onGenerateSummary) }
@@ -554,6 +716,10 @@ private fun GoogleCalendarCard(
                     style = MaterialTheme.typography.bodySmall
                 )
                 Button(onClick = onConnectGoogle) { Text("Google と連携") }
+                // サインイン失敗の理由（OAuth 設定不備・キャンセル等）をここに表示する。
+                ui.googleMessage?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
             } else {
                 Text("連携中: ${ui.googleEmail}", style = MaterialTheme.typography.bodySmall)
                 if (ui.calendarEvents.isEmpty()) {
@@ -603,6 +769,54 @@ private fun MoodleCard(
                 }
             }
             ui.moodleMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+/** Waseda アカウント連携カード。各ユーザーが自分の Waseda ID・パスワードを保存する。 */
+@Composable
+private fun WasedaCard(
+    ui: UiState,
+    onLoadWaseda: () -> Unit,
+    onSaveWaseda: (String, String) -> Unit,
+) {
+    LaunchedEffect(ui.account.email) { onLoadWaseda() }
+    var user by rememberSaveable(ui.wasedaUser) { mutableStateOf(ui.wasedaUser) }
+    var password by rememberSaveable { mutableStateOf("") }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Waseda アカウント連携", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "MyWaseda のログイン情報を保存すると、科目登録（時間割）を自動取得できます。" +
+                    "パスワードは暗号化して保存され、時間割取得にのみ使われます。",
+                style = MaterialTheme.typography.bodySmall
+            )
+            OutlinedTextField(
+                value = user,
+                onValueChange = { user = it },
+                label = { Text("Waseda ID（例: xxxx@akane.waseda.jp）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text(if (ui.wasedaHasPassword) "パスワード（変更時のみ入力）" else "パスワード") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth()
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(
+                    onClick = { onSaveWaseda(user, password); password = "" },
+                    enabled = !ui.wasedaBusy && user.isNotBlank() &&
+                        (password.isNotEmpty() || ui.wasedaHasPassword)
+                ) { Text("保存") }
+                if (ui.wasedaHasPassword) {
+                    Text("パスワード保存済み", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            ui.wasedaMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
         }
     }
 }
@@ -782,6 +996,48 @@ private fun ControlRow(service: ServiceState, onStart: () -> Unit, onStop: () ->
         "※ 一時停止/再開は通知バーのボタンから行えます。",
         style = MaterialTheme.typography.bodySmall
     )
+}
+
+/**
+ * 文字起こし方法の選択カード。
+ * 端末処理(Whisper)は遅い端末だと時間がかかるため、音声をサーバーへアップロードして
+ * サーバー側で文字起こしするモードを選べる（AIHelper ログインが必要）。
+ */
+@Composable
+private fun TranscribeModeCard(ui: UiState, onSetServerTranscribe: (Boolean) -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("文字起こしの方法", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(selected = !ui.serverTranscribe, onClick = { onSetServerTranscribe(false) })
+                Column {
+                    Text("端末で処理（オフライン）", style = MaterialTheme.typography.bodyMedium)
+                    Text("Whisper モデルで端末内処理。通信不要だが時間がかかる。",
+                        style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(
+                    selected = ui.serverTranscribe,
+                    onClick = { onSetServerTranscribe(true) },
+                    enabled = ui.account.loggedIn
+                )
+                Column {
+                    Text("サーバーで処理（音声をアップロード）", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (ui.account.loggedIn)
+                            "録音区間の音声をサーバーへ送り、サーバー側で文字起こし。処理状況はダッシュボードで確認できます。"
+                        else "利用するには先に「秘書」タブで AIHelper にログインしてください。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            Text(
+                "※ 切り替えは次回の録音開始から反映されます。",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
 }
 
 /**

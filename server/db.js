@@ -100,10 +100,64 @@ async function ensureSchema() {
   await addColumnIfMissing("transcripts", "yotei_json", "LONGTEXT NULL");
   await addColumnIfMissing("transcripts", "summary", "TEXT NULL");
   await addColumnIfMissing("transcripts", "analyzed_at", "DATETIME NULL");
+  // 資料ファイル（PDF/TXT等）の AI 要約。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS documents (
+      id          INT AUTO_INCREMENT PRIMARY KEY,
+      email       VARCHAR(255) NOT NULL,
+      name        VARCHAR(512) NOT NULL,
+      mime        VARCHAR(128) NULL,
+      summary     LONGTEXT     NOT NULL,
+      created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_doc (email, name)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  // 履修時間割（科目登録から取得）。曜日×時限×科目名×教室。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS courses (
+      id         INT AUTO_INCREMENT PRIMARY KEY,
+      email      VARCHAR(255) NOT NULL,
+      term       VARCHAR(32)  NULL,
+      day        VARCHAR(8)   NULL,
+      period     INT          NULL,
+      name       VARCHAR(255) NOT NULL,
+      room       VARCHAR(255) NULL,
+      start_time VARCHAR(8)   NULL,
+      end_time   VARCHAR(8)   NULL,
+      updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_courses_email (email)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
+  // 端末からアップロードされた音声ファイルのサーバー側文字起こしジョブ。
+  // status: 'queued' → 'processing' → 'done' | 'error'
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audio_jobs (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      email         VARCHAR(255) NOT NULL,
+      filename      VARCHAR(255) NOT NULL,
+      stored_path   VARCHAR(1024) NOT NULL,
+      mime          VARCHAR(128) NULL,
+      size_bytes    BIGINT       NOT NULL DEFAULT 0,
+      status        VARCHAR(16)  NOT NULL DEFAULT 'queued',
+      error         TEXT         NULL,
+      transcript_id INT          NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_audio_email (email, created_at),
+      KEY idx_audio_status (status)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
   // Moodle カレンダーの iCal 書き出し URL（ユーザーごと）。
   await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
   await addColumnIfMissing("users", "google_email", "VARCHAR(255) NULL");
+  // Waseda アカウント（時間割スクレイパ用）。パスワードは AES-256-GCM で暗号化して保存。
+  await addColumnIfMissing("users", "waseda_user", "VARCHAR(255) NULL");
+  await addColumnIfMissing("users", "waseda_password_enc", "VARCHAR(1024) NULL");
 }
 
 async function addColumnIfMissing(table, column, definition) {
@@ -232,6 +286,32 @@ async function getTranscriptsForDay(email, day) {
   return rows;
 }
 
+// 質問文のキーワードに一致する過去の文字起こしを探し、一致箇所前後の抜粋を返す。
+// keywords は2文字以上の語の配列。返り値: [{ filename, snippet }]
+async function searchTranscriptSnippets(email, keywords, { limit = 5, snippetLen = 400 } = {}) {
+  const terms = (keywords || []).filter((k) => k && k.length >= 2).slice(0, 8);
+  if (terms.length === 0) return [];
+  const likes = terms.map(() => `content LIKE ?`).join(" OR ");
+  const args = [email, ...terms.map((t) => `%${t}%`)];
+  const [rows] = await pool.query(
+    `SELECT filename, content FROM transcripts
+     WHERE email = ? AND (${likes})
+     ORDER BY updated_at DESC LIMIT ?`,
+    [...args, limit]
+  );
+  return rows.map((r) => {
+    // 最初に一致した語の前後を抜粋する。
+    let idx = -1;
+    for (const t of terms) {
+      const i = r.content.indexOf(t);
+      if (i >= 0 && (idx < 0 || i < idx)) idx = i;
+    }
+    const start = Math.max(0, (idx < 0 ? 0 : idx) - Math.floor(snippetLen / 2));
+    const snippet = r.content.slice(start, start + snippetLen);
+    return { filename: r.filename, snippet };
+  });
+}
+
 // =====================================================================
 // 課題・予定（tasks）
 // =====================================================================
@@ -320,6 +400,67 @@ async function findDueTasks(flagColumn, withinMinutes) {
 async function markNotified(id, flagColumn) {
   const col = flagColumn === "notified_1h" ? "notified_1h" : "notified_1d";
   await pool.query(`UPDATE tasks SET ${col} = 1 WHERE id = ?`, [id]);
+}
+
+// =====================================================================
+// 音声文字起こしジョブ（audio_jobs）
+// =====================================================================
+
+async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
+  const [r] = await pool.query(
+    `INSERT INTO audio_jobs (email, filename, stored_path, mime, size_bytes)
+     VALUES (?, ?, ?, ?, ?)`,
+    [email, filename, storedPath, mime || null, sizeBytes || 0]
+  );
+  return r.insertId;
+}
+
+// 次の待機ジョブを1件つかんで processing にする（多重取得防止のため UPDATE で確保）。
+async function claimNextAudioJob() {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query(
+      `SELECT id, email, filename, stored_path, mime FROM audio_jobs
+       WHERE status = 'queued' ORDER BY id ASC LIMIT 1 FOR UPDATE`
+    );
+    if (!rows[0]) {
+      await conn.commit();
+      return null;
+    }
+    await conn.query(`UPDATE audio_jobs SET status = 'processing', error = NULL WHERE id = ?`, [rows[0].id]);
+    await conn.commit();
+    return rows[0];
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function finishAudioJob(id, { status, error = null, transcriptId = null }) {
+  await pool.query(
+    `UPDATE audio_jobs SET status = ?, error = ?, transcript_id = ? WHERE id = ?`,
+    [status, error, transcriptId, id]
+  );
+}
+
+async function listAudioJobs(email, limit = 30) {
+  const [rows] = await pool.query(
+    `SELECT id, filename, size_bytes, status, error, transcript_id, created_at, updated_at
+     FROM audio_jobs WHERE email = ? ORDER BY id DESC LIMIT ?`,
+    [email, limit]
+  );
+  return rows;
+}
+
+// サーバー再起動時、processing のまま残ったジョブを queued に戻す（処理が中断されたため）。
+async function requeueStaleAudioJobs() {
+  const [r] = await pool.query(
+    `UPDATE audio_jobs SET status = 'queued' WHERE status = 'processing'`
+  );
+  return r.affectedRows;
 }
 
 // =====================================================================
@@ -442,6 +583,76 @@ async function getMoodleUrl(email) {
   return rows[0] ? rows[0].moodle_ical_url : null;
 }
 
+async function saveDocument(email, name, mime, summary) {
+  await pool.query(
+    `INSERT INTO documents (email, name, mime, summary) VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE mime = VALUES(mime), summary = VALUES(summary), updated_at = CURRENT_TIMESTAMP`,
+    [email, name, mime || null, summary]
+  );
+}
+
+async function listDocuments(email, limit = 100) {
+  const [rows] = await pool.query(
+    `SELECT id, name, mime, summary, updated_at FROM documents WHERE email = ? ORDER BY updated_at DESC LIMIT ?`,
+    [email, limit]
+  );
+  return rows;
+}
+
+// 時間割をまるごと置き換える（科目登録は滅多に変わらないため全入れ替え）。
+async function replaceCourses(email, courses) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    await conn.query(`DELETE FROM courses WHERE email = ?`, [email]);
+    for (const c of courses || []) {
+      const name = String(c.name || "").trim();
+      if (!name) continue;
+      await conn.query(
+        `INSERT INTO courses (email, term, day, period, name, room, start_time, end_time)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          email, c.term || null, c.day || null,
+          c.period != null ? Number(c.period) : null,
+          name.slice(0, 255), (c.room || null), (c.start_time || null), (c.end_time || null),
+        ]
+      );
+    }
+    await conn.commit();
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function listCourses(email) {
+  const [rows] = await pool.query(
+    `SELECT term, day, period, name, room, start_time, end_time
+     FROM courses WHERE email = ?
+     ORDER BY FIELD(day,'月','火','水','木','金','土','日'), period`,
+    [email]
+  );
+  return rows;
+}
+
+// Waseda アカウント情報の保存・取得。password は暗号化済み文字列を渡す（暗号化は呼び出し側）。
+async function setWasedaCreds(email, wasedaUser, passwordEnc) {
+  await pool.query(
+    `UPDATE users SET waseda_user = ?, waseda_password_enc = ? WHERE email = ?`,
+    [wasedaUser || null, passwordEnc || null, email]
+  );
+}
+
+async function getWasedaCreds(email) {
+  const [rows] = await pool.query(
+    `SELECT waseda_user, waseda_password_enc FROM users WHERE email = ? LIMIT 1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
 async function setGoogleEmail(email, googleEmail) {
   await pool.query(`UPDATE users SET google_email = ? WHERE email = ?`, [googleEmail || null, email]);
 }
@@ -466,7 +677,13 @@ module.exports = {
   setMoodleUrl,
   getMoodleUrl,
   listUsersWithMoodle,
+  setWasedaCreds,
+  getWasedaCreds,
   setGoogleEmail,
+  replaceCourses,
+  listCourses,
+  saveDocument,
+  listDocuments,
   // transcripts
   saveTranscript,
   saveAnalysis,
@@ -475,6 +692,7 @@ module.exports = {
   listTranscripts,
   getTranscript,
   getTranscriptsForDay,
+  searchTranscriptSnippets,
   // tasks
   upsertTasks,
   addTask,
@@ -483,6 +701,12 @@ module.exports = {
   deleteTask,
   findDueTasks,
   markNotified,
+  // audio jobs
+  createAudioJob,
+  claimNextAudioJob,
+  finishAudioJob,
+  listAudioJobs,
+  requeueStaleAudioJobs,
   // summaries
   saveDailySummary,
   getDailySummary,

@@ -61,6 +61,16 @@ data class UiState(
     val moodleUrl: String = "",
     val moodleBusy: Boolean = false,
     val moodleMessage: String? = null,
+    // Waseda アカウント連携（時間割取り込み用）
+    val wasedaUser: String = "",
+    val wasedaHasPassword: Boolean = false,
+    val wasedaBusy: Boolean = false,
+    val wasedaMessage: String? = null,
+    // カレンダー: 選択日の要約
+    val daySummaryDay: String? = null,
+    val daySummary: String? = null,
+    /** true なら録音音声をサーバーへアップロードして文字起こしする（端末 Whisper を使わない）。 */
+    val serverTranscribe: Boolean = false,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
     val googleConnected: Boolean get() = googleEmail != null
@@ -76,8 +86,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val ui: StateFlow<UiState> = _ui
 
     init {
-        _ui.update { it.copy(account = currentAccount()) }
+        _ui.update { it.copy(account = currentAccount(), serverTranscribe = accountStore.serverTranscribe) }
         refresh()
+        // ログイン済みで起動した場合もカレンダー・予定タブにデータが出るよう最初に読み込む。
+        if (accountStore.loggedIn) {
+            loadTasks()
+            loadSummary()
+        }
     }
 
     fun refresh() {
@@ -94,6 +109,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 transcripts = items,
             )
         }
+    }
+
+    /** 文字起こしを端末(Whisper)で行うか、音声をサーバーへ送って行うかを切り替える。 */
+    fun setServerTranscribe(enabled: Boolean) {
+        accountStore.serverTranscribe = enabled
+        _ui.update { it.copy(serverTranscribe = enabled) }
     }
 
     /** 文字起こしに使うモデルを選び直す（ダウンロード済みのモデルのみ）。 */
@@ -312,13 +333,52 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update {
                 it.copy(chatLog = it.chatLog + ChatMessage(reply, false), askInProgress = false)
             }
-            // 「予定入れといて」等でタスクが増減した可能性があるので一覧を更新。
-            val applied = result.getOrNull()?.applied ?: 0
-            if (applied > 0) loadTasks()
+            // 秘書が予定・課題を追加/完了した可能性があるので、成功時は必ず一覧を更新。
+            if (result.isSuccess) loadTasks()
+        }
+    }
+
+    /** カレンダーで選んだ日の要約を取得する。 */
+    fun loadDaySummary(day: String) {
+        if (!accountStore.loggedIn) {
+            _ui.update { it.copy(daySummaryDay = day, daySummary = null) }
+            return
+        }
+        _ui.update { it.copy(daySummaryDay = day, daySummary = null) }
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                AIHelper.fetchDaySummary(accountStore.baseUrl, accountStore.email, accountStore.token, day)
+            }
+            r.onSuccess { s -> _ui.update { if (it.daySummaryDay == day) it.copy(daySummary = s) else it } }
         }
     }
 
     // ---- Google カレンダー連携 ----
+
+    /**
+     * Google サインイン画面の結果を処理する。失敗理由（SHA-1 未登録の DEVELOPER_ERROR 等）を
+     * 握りつぶさず googleMessage に出す。成功時はアカウントを反映して予定を読み込む。
+     */
+    fun onGoogleSignInResult(data: android.content.Intent?) {
+        try {
+            val account = GoogleSignIn.getSignedInAccountFromIntent(data)
+                .getResult(com.google.android.gms.common.api.ApiException::class.java)
+            _ui.update { it.copy(googleEmail = account.email, googleMessage = null) }
+            refreshGoogle()
+        } catch (e: com.google.android.gms.common.api.ApiException) {
+            val hint = when (e.statusCode) {
+                com.google.android.gms.common.api.CommonStatusCodes.DEVELOPER_ERROR ->
+                    "設定エラー(10): Google Cloud Console にこのアプリの OAuth クライアント" +
+                        "（パッケージ名と SHA-1）が登録されていません"
+                com.google.android.gms.common.api.CommonStatusCodes.NETWORK_ERROR ->
+                    "ネットワークエラー。通信環境を確認してください"
+                com.google.android.gms.common.api.CommonStatusCodes.SIGN_IN_REQUIRED, 12501 ->
+                    "サインインがキャンセルされました"
+                else -> "サインイン失敗 (コード ${e.statusCode})"
+            }
+            _ui.update { it.copy(googleMessage = hint) }
+        }
+    }
 
     /** サインイン済みアカウントを反映（サインイン結果後・起動時に呼ぶ）。 */
     fun refreshGoogle() {
@@ -333,6 +393,44 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     withContext(Dispatchers.IO) {
                         AIHelper.linkGoogle(accountStore.baseUrl, accountStore.email, accountStore.token, gEmail)
                     }
+                }
+            }
+        }
+    }
+
+    /** サーバーに保存済みの Waseda アカウント情報を取得。 */
+    fun loadWaseda() {
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                AIHelper.fetchWaseda(accountStore.baseUrl, accountStore.email, accountStore.token)
+            }
+            r.onSuccess { (user, hasPw) ->
+                _ui.update { it.copy(wasedaUser = user, wasedaHasPassword = hasPw) }
+            }
+        }
+    }
+
+    /** Waseda の ID・パスワードをサーバーに保存する（各ユーザー自身のアカウントに紐付く）。 */
+    fun saveWaseda(wasedaUser: String, wasedaPassword: String) {
+        if (!accountStore.loggedIn || _ui.value.wasedaBusy) return
+        _ui.update { it.copy(wasedaBusy = true, wasedaMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.saveWaseda(
+                    accountStore.baseUrl, accountStore.email, accountStore.token,
+                    wasedaUser.trim(), wasedaPassword
+                )
+            }
+            _ui.update {
+                when (result) {
+                    is AiHelperClient.Result.Ok -> it.copy(
+                        wasedaBusy = false, wasedaMessage = "保存しました",
+                        wasedaUser = wasedaUser.trim(),
+                        wasedaHasPassword = it.wasedaHasPassword || wasedaPassword.isNotEmpty(),
+                    )
+                    is AiHelperClient.Result.Error ->
+                        it.copy(wasedaBusy = false, wasedaMessage = result.message)
                 }
             }
         }

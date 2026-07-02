@@ -81,9 +81,9 @@ object GoogleCalendarClient {
                 throw RuntimeException("期限が未設定のためカレンダーに登録できません")
             }
             if (dateOnly) {
-                val day = dayString(at)
-                body.put("start", JSONObject().put("date", day))
-                body.put("end", JSONObject().put("date", day))
+                // 終日予定の end.date は排他的（翌日）を指定する。同日だと API が 400 を返す。
+                body.put("start", JSONObject().put("date", dayString(at)))
+                body.put("end", JSONObject().put("date", dayString(at + 24 * 3600_000L)))
             } else {
                 body.put("start", JSONObject().put("dateTime", rfc3339(at - 30 * 60_000)))
                 body.put("end", JSONObject().put("dateTime", rfc3339(at)))

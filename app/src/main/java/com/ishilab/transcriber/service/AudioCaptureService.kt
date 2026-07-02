@@ -57,6 +57,10 @@ class AudioCaptureService : Service() {
     private lateinit var store: TranscriptStore
     private lateinit var modelManager: ModelManager
     private var engine: TranscriptionEngine? = null
+    private lateinit var accountStore: com.ishilab.transcriber.net.AccountStore
+    private val aiHelper = com.ishilab.transcriber.net.AiHelperClient()
+    // 送信に失敗した音声区間の退避先（次回のワーカー起動・次区間成功時に再送する）。
+    private lateinit var audioOutboxDir: File
 
     private lateinit var wakeLock: PowerManager.WakeLock
     @Volatile private var backgroundSync: BackgroundSync? = null
@@ -87,7 +91,9 @@ class AudioCaptureService : Service() {
         super.onCreate()
         store = TranscriptStore(filesDir)
         modelManager = ModelManager(this)
+        accountStore = com.ishilab.transcriber.net.AccountStore(this)
         segmentsDir = File(filesDir, "segments").apply { mkdirs() }
+        audioOutboxDir = File(filesDir, "audio-outbox").apply { mkdirs() }
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "$WAKE_TAG::lock")
         createChannel()
@@ -352,22 +358,30 @@ class AudioCaptureService : Service() {
     // ---- 文字起こしワーカー -------------------------------------------------
 
     private fun runWorker() {
-        // モデル読み込み（利用者が選択したモデルを優先。未DLならDL済みの先頭）
-        val model = modelManager.activeModel()
-        if (model == null) {
-            pushState { it.copy(error = "モデル未ダウンロード") }
-            stopEverything()
-            return
-        }
-        try {
-            engine = WhisperEngine(modelManager.modelFile(model).absolutePath).also { it.load() }
-            pushState { it.copy(modelName = model.displayName) }
+        // サーバー文字起こしモード: 端末では Whisper を回さず、音声をアップロードするだけ。
+        val serverMode = accountStore.serverTranscribe && accountStore.loggedIn
+        if (serverMode) {
+            pushState { it.copy(modelName = "サーバー処理（音声アップロード）") }
             updateNotification()
-        } catch (e: Exception) {
-            Log.e(TAG, "model load failed", e)
-            pushState { it.copy(error = "モデル読み込み失敗: ${e.message}") }
-            stopEverything()
-            return
+            retryAudioOutbox() // 前回送れなかった区間があれば先に再送を試みる
+        } else {
+            // モデル読み込み（利用者が選択したモデルを優先。未DLならDL済みの先頭）
+            val model = modelManager.activeModel()
+            if (model == null) {
+                pushState { it.copy(error = "モデル未ダウンロード") }
+                stopEverything()
+                return
+            }
+            try {
+                engine = WhisperEngine(modelManager.modelFile(model).absolutePath).also { it.load() }
+                pushState { it.copy(modelName = model.displayName) }
+                updateNotification()
+            } catch (e: Exception) {
+                Log.e(TAG, "model load failed", e)
+                pushState { it.copy(error = "モデル読み込み失敗: ${e.message}") }
+                stopEverything()
+                return
+            }
         }
 
         // POISON が来るまで（＝終了指示まで）は、積まれた区間を全て処理し切る。
@@ -378,10 +392,71 @@ class AudioCaptureService : Service() {
                 break
             }
             if (seg === POISON) break
-            transcribeSegment(seg)
+            if (serverMode) uploadSegment(seg) else transcribeSegment(seg)
             pushState { it.copy(queueSize = segmentQueue.size) }
         }
         Log.i(TAG, "worker finished")
+    }
+
+    /**
+     * サーバー文字起こしモード: 区間 PCM を WAV としてアップロードする。
+     * 失敗したら outbox に退避し、次の機会（次区間成功時・次回起動時）に再送する。
+     */
+    private fun uploadSegment(seg: Segment) {
+        pushState { it.copy(transcribing = true, transcribeLabel = "${seg.label} を送信", transcribeProgress = 0f) }
+        updateNotification()
+        val uploadName = hourKey(seg.startMillis) + ".wav"
+        var ok = false
+        try {
+            for (attempt in 1..3) {
+                val r = aiHelper.uploadAudioPcm(
+                    accountStore.baseUrl, accountStore.email, accountStore.token,
+                    seg.file, uploadName, AudioChunker.SAMPLE_RATE
+                )
+                if (r.isSuccess) { ok = true; break }
+                Log.w(TAG, "audio upload failed (try $attempt): ${r.exceptionOrNull()?.message}")
+                Thread.sleep(5_000L * attempt)
+            }
+        } catch (_: InterruptedException) {
+            // 終了要求。区間は outbox に退避して次回送る。
+        } finally {
+            if (ok) {
+                seg.file.delete()
+                pushState {
+                    it.copy(
+                        transcribing = false, transcribeLabel = null,
+                        chunksDone = it.chunksDone + 1,
+                        lastText = "${seg.label} をサーバーへ送信しました（サーバーで文字起こし中）",
+                    )
+                }
+                retryAudioOutbox() // 通信が生きているうちに滞留分も送る
+            } else {
+                // ファイル名に開始時刻が入っているので、そのまま outbox へ移して後で再送する。
+                val moved = File(audioOutboxDir, seg.file.name)
+                if (!seg.file.renameTo(moved)) seg.file.delete()
+                pushState {
+                    it.copy(
+                        transcribing = false, transcribeLabel = null,
+                        error = "音声のアップロードに失敗しました（次回自動再送します）",
+                    )
+                }
+            }
+            updateNotification()
+        }
+    }
+
+    /** outbox に退避してある未送信の音声区間を再送する。 */
+    private fun retryAudioOutbox() {
+        val files = audioOutboxDir.listFiles { f -> f.isFile && f.name.endsWith(".pcm") } ?: return
+        for (f in files.sortedBy { it.name }) {
+            val millis = f.name.removePrefix("seg-").removeSuffix(".pcm").toLongOrNull() ?: 0L
+            val name = hourKey(if (millis > 0) millis else f.lastModified()) + ".wav"
+            val r = aiHelper.uploadAudioPcm(
+                accountStore.baseUrl, accountStore.email, accountStore.token,
+                f, name, AudioChunker.SAMPLE_RATE
+            )
+            if (r.isSuccess) f.delete() else break // 失敗したら通信不調とみなし今回は打ち切る
+        }
     }
 
     /** 1区間(最大1時間)を30秒窓で順に文字起こしし、テキストを保存して送信をトリガする。 */

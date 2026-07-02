@@ -68,6 +68,135 @@ async function callText(prompt, { temperature = 0.3 } = {}) {
   return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("").trim() || "";
 }
 
+// ---- 資料ファイルの要約（PDF は inlineData、TXT はテキストで渡す） ----
+// opts: { name, mimeType, text?, base64? }
+async function summarizeDocument({ name, mimeType, text, base64 }) {
+  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
+  const instruction =
+    `次の資料「${name}」の内容を日本語で要約してください。` +
+    `要点を箇条書き中心に300〜600字程度で。課題・提出物・締切・日付があれば必ず明記してください。`;
+  const parts = [{ text: instruction }];
+  if (base64 && mimeType) {
+    parts.push({ inlineData: { mimeType, data: base64 } });
+  } else if (text && text.trim()) {
+    parts.push({ text: "\n\n--- 資料本文 ---\n" + text.slice(0, 100000) });
+  } else {
+    throw new Error("要約する内容がありません");
+  }
+  const res = await fetch(ENDPOINT(MODEL), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+    body: JSON.stringify({
+      contents: [{ role: "user", parts }],
+      generationConfig: { temperature: 0.3 },
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Gemini API エラー ${res.status}: ${t.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  const out = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("").trim() || "";
+  if (!out) throw new Error("Gemini から空の応答が返りました");
+  return out;
+}
+
+// ---- 音声ファイルの文字起こし（Files API 経由） ----
+// 1時間の WAV は 100MB を超え inlineData の上限(20MB)に収まらないため、
+// resumable アップロードで Files API に置いてから generateContent で参照する。
+const FILES_BASE = "https://generativelanguage.googleapis.com";
+
+async function uploadFile(filePath, mimeType, displayName) {
+  const fs = require("fs");
+  const size = fs.statSync(filePath).size;
+  // 1) アップロードセッション開始
+  const startRes = await fetch(`${FILES_BASE}/upload/v1beta/files`, {
+    method: "POST",
+    headers: {
+      "x-goog-api-key": API_KEY,
+      "X-Goog-Upload-Protocol": "resumable",
+      "X-Goog-Upload-Command": "start",
+      "X-Goog-Upload-Header-Content-Length": String(size),
+      "X-Goog-Upload-Header-Content-Type": mimeType,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ file: { display_name: displayName || "audio" } }),
+  });
+  if (!startRes.ok) {
+    throw new Error(`Files API 開始エラー ${startRes.status}: ${(await startRes.text()).slice(0, 300)}`);
+  }
+  const uploadUrl = startRes.headers.get("x-goog-upload-url");
+  if (!uploadUrl) throw new Error("Files API がアップロード URL を返しませんでした");
+  // 2) 本体を送信して確定
+  const data = fs.readFileSync(filePath);
+  const upRes = await fetch(uploadUrl, {
+    method: "POST",
+    headers: {
+      "X-Goog-Upload-Offset": "0",
+      "X-Goog-Upload-Command": "upload, finalize",
+    },
+    body: data,
+  });
+  if (!upRes.ok) {
+    throw new Error(`Files API 送信エラー ${upRes.status}: ${(await upRes.text()).slice(0, 300)}`);
+  }
+  return (await upRes.json()).file; // { name, uri, state, ... }
+}
+
+async function waitFileActive(fileName, { timeoutMs = 5 * 60_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await fetch(`${FILES_BASE}/v1beta/${fileName}`, {
+      headers: { "x-goog-api-key": API_KEY },
+    });
+    if (!res.ok) throw new Error(`Files API 状態取得エラー ${res.status}`);
+    const f = await res.json();
+    if (f.state === "ACTIVE") return f;
+    if (f.state === "FAILED") throw new Error("Files API 側でファイル処理に失敗しました");
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+  throw new Error("Files API の処理待ちがタイムアウトしました");
+}
+
+// 音声ファイルを文字起こしして本文テキストを返す。
+async function transcribeAudio(filePath, mimeType, displayName) {
+  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
+  const uploaded = await uploadFile(filePath, mimeType, displayName);
+  const active = await waitFileActive(uploaded.name);
+  const body = {
+    contents: [{
+      role: "user",
+      parts: [
+        {
+          text:
+            "この音声を日本語で文字起こししてください。話された内容のみを、" +
+            "話者の言葉どおりに書き起こします。相づちやフィラー（えー、あの等）は省いて構いません。" +
+            "説明・前置き・タイムスタンプは不要で、書き起こし本文だけを出力してください。" +
+            "無音や聞き取れない場合は空文字を返してください。",
+        },
+        { fileData: { mimeType, fileUri: active.uri } },
+      ],
+    }],
+    generationConfig: { temperature: 0.1 },
+  };
+  const res = await fetch(ENDPOINT(MODEL), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+    body: JSON.stringify(body),
+  });
+  // 使い終わった Files API 上のファイルは消す（失敗しても致命的でない）。
+  fetch(`${FILES_BASE}/v1beta/${uploaded.name}`, {
+    method: "DELETE",
+    headers: { "x-goog-api-key": API_KEY },
+  }).catch(() => {});
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`Gemini API エラー ${res.status}: ${t.slice(0, 300)}`);
+  }
+  const data = await res.json();
+  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("").trim() || "";
+}
+
 // =====================================================================
 // 1) 抽出 + 要約
 // =====================================================================
@@ -226,9 +355,27 @@ async function ask(question, ctx = {}) {
     .filter((s) => s)
     .join("\n")
     .slice(0, 4000);
+  const coursesText = (ctx.courses || [])
+    .map((c) => {
+      const dp = `${c.day || ""}${c.period != null ? c.period + "限" : ""}`.trim();
+      const time = c.start_time ? ` ${c.start_time}-${c.end_time || ""}` : "";
+      const room = c.room ? ` @${c.room}` : "";
+      return `${dp}${time} ${c.name}${room}`.trim();
+    })
+    .filter((s) => s)
+    .join("\n")
+    .slice(0, 4000);
+  const documentsText = (ctx.documents || [])
+    .map((d) => `《${d.name}》\n${d.summary}`)
+    .join("\n\n")
+    .slice(0, 12000);
+  const snippetsText = (ctx.snippets || [])
+    .map((s) => `--- ${s.filename} ---\n${s.snippet}`)
+    .join("\n\n")
+    .slice(0, 8000);
 
   const prompt = [
-    "あなたは利用者専属の有能な秘書です。利用者の課題・予定・日々の記録を把握しており、",
+    "あなたは利用者（大学生）専属の有能な秘書です。利用者の課題・予定・授業の記録・資料を把握しており、",
     "話し言葉で親しみやすく、かつ的確に答えます。",
     `本日は ${today} です。相対的な日付表現はこの日付基準で YYYY-MM-DD(HH:MM) に変換して扱ってください。`,
     "",
@@ -242,11 +389,24 @@ async function ask(question, ctx = {}) {
     "■ カレンダーの予定（Googleカレンダー等）:",
     calendarText || "（なし）",
     "",
+    "■ 履修時間割（曜日・時限・科目・教室）:",
+    coursesText || "（なし）",
+    "",
+    "■ 授業資料の要約（アップロードされた PDF/テキスト）:",
+    documentsText || "（なし）",
+    "",
+    "■ 質問に関連する過去の授業・会話の文字起こし抜粋:",
+    snippetsText || "（なし）",
+    "",
     "【利用者の発話】",
     question,
     "",
     "【あなたのすべきこと】",
     "- 質問（例『今日の予定は？』『締切が近い課題は？』）には、上のデータを根拠に簡潔に答える。reply に回答文。",
+    "- 授業の内容に関する質問（例『先週の統計学で何やった？』『レポートの提出条件は？』）には、",
+    "  文字起こし抜粋・資料要約・日次要約を根拠に答える。どの記録に基づくかを一言添える。",
+    "- 学習内容の一般的な質問（例『t検定ってなに？』）には、あなた自身の知識で分かりやすく教えてよい。",
+    "  ただし利用者の記録にある情報と一般知識の説明は区別が伝わるように話す。",
     "- 依頼（例『来週月曜にゼミの予定入れといて』『数学の宿題が出てるらしい、登録して』）なら、",
     "  actions に op='add_task' を入れる。type は課題=kadai/予定=yotei、content=短い名前、",
     "  deadline=YYYY-MM-DD か YYYY-MM-DD HH:MM（不明なら空）、details=補足。",
@@ -300,4 +460,7 @@ function localDate(date = new Date()) {
   return `${y}-${m}-${d}`;
 }
 
-module.exports = { analyze, summarizeDay, ask, isConfigured, localDate, MODEL };
+module.exports = {
+  analyze, summarizeDay, ask, summarizeDocument, transcribeAudio,
+  isConfigured, localDate, MODEL,
+};
