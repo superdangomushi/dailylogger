@@ -1437,8 +1437,8 @@ function renderDashboard(tableRows) {
         $('googleAccounts').innerHTML = googleAccounts.map(e =>
           '<div class="row" style="margin:.2rem 0; gap:.4rem">'+
           '<label style="flex:1"><input type="radio" name="gdef" '+(e===def?'checked':'')+
-          ' onchange="setGoogleDefault(\''+escapeHtml(e)+'\')"> '+escapeHtml(e)+'</label>'+
-          '<button class="ghost small" onclick="unlinkGoogle(\''+escapeHtml(e)+'\')">解除</button></div>').join('') +
+          ' onchange="setGoogleDefault(\\\''+escapeHtml(e)+'\\\')"> '+escapeHtml(e)+'</label>'+
+          '<button class="ghost small" onclick="unlinkGoogle(\\\''+escapeHtml(e)+'\\\')">解除</button></div>').join('') +
           (googleAccounts.length>1 ? '<p class="muted" style="margin:.2rem 0">選択中のアカウントが「カレンダー登録」の登録先になります。</p>' : '');
       }
       renderTasks(); // 連携状態でタスク行の「カレンダー登録」ボタン表示が変わる
