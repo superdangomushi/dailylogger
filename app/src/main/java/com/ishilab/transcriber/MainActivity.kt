@@ -75,7 +75,6 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.net.AiHelperClient
@@ -116,12 +115,20 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val ui by viewModel.ui.collectAsState()
                     val service by AudioCaptureService.state.collectAsStateWithLifecycle()
-                    val signInClient = remember {
-                        GoogleSignIn.getClient(this@MainActivity, GoogleCalendarClient.signInOptions())
-                    }
+                    // アカウント選択（複数連携可）: システムの Google アカウント選択画面を使う。
                     val googleLauncher = rememberLauncherForActivityResult(
                         ActivityResultContracts.StartActivityForResult()
-                    ) { result -> viewModel.onGoogleSignInResult(result.data) }
+                    ) { result -> viewModel.onGoogleAccountPicked(result.data) }
+                    // 初回利用許可（同意画面）: 許可後にカレンダーを読み直す。
+                    val consentLauncher = rememberLauncherForActivityResult(
+                        ActivityResultContracts.StartActivityForResult()
+                    ) { viewModel.loadCalendar() }
+                    LaunchedEffect(ui.googleConsentIntent) {
+                        ui.googleConsentIntent?.let { intent ->
+                            viewModel.consentIntentLaunched()
+                            consentLauncher.launch(intent)
+                        }
+                    }
                     MainScreen(
                         ui = ui,
                         service = service,
@@ -141,11 +148,11 @@ class MainActivity : ComponentActivity() {
                         onSetShowDone = { viewModel.loadTasks(it) },
                         onLoadSummary = viewModel::loadSummary,
                         onGenerateSummary = viewModel::generateSummary,
-                        onConnectGoogle = { googleLauncher.launch(signInClient.signInIntent) },
-                        onDisconnectGoogle = {
-                            signInClient.signOut()
-                            viewModel.onGoogleDisconnected()
+                        onConnectGoogle = {
+                            googleLauncher.launch(GoogleCalendarClient.chooseAccountIntent())
                         },
+                        onDisconnectGoogle = viewModel::disconnectGoogle,
+                        onSetDefaultGoogle = viewModel::setDefaultGoogle,
                         onLoadCalendar = viewModel::loadCalendar,
                         onAddToCalendar = viewModel::addTaskToCalendar,
                         onLoadMoodle = viewModel::loadMoodle,
@@ -201,7 +208,8 @@ private fun MainScreen(
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
     onConnectGoogle: () -> Unit,
-    onDisconnectGoogle: () -> Unit,
+    onDisconnectGoogle: (String) -> Unit,
+    onSetDefaultGoogle: (String) -> Unit,
     onLoadCalendar: () -> Unit,
     onAddToCalendar: (AiHelperClient.Task) -> Unit,
     onLoadMoodle: () -> Unit,
@@ -235,7 +243,7 @@ private fun MainScreen(
                     else -> SecretaryTab(
                         ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
                         onLoadSummary, onGenerateSummary,
-                        onConnectGoogle, onDisconnectGoogle, onLoadCalendar, onAddToCalendar,
+                        onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar, onAddToCalendar,
                         onLoadMoodle, onSaveMoodleUrl, onSyncMoodle, onLoadWaseda, onSaveWaseda, onSyncWaseda
                     )
                 }
@@ -613,7 +621,8 @@ private fun SecretaryTab(
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
     onConnectGoogle: () -> Unit,
-    onDisconnectGoogle: () -> Unit,
+    onDisconnectGoogle: (String) -> Unit,
+    onSetDefaultGoogle: (String) -> Unit,
     onLoadCalendar: () -> Unit,
     onAddToCalendar: (AiHelperClient.Task) -> Unit,
     onLoadMoodle: () -> Unit,
@@ -632,7 +641,7 @@ private fun SecretaryTab(
         item { AiHelperCard(ui, onLogin, onRegister, onLogout) }
 
         // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
-        item { GoogleCalendarCard(ui, onConnectGoogle, onDisconnectGoogle, onLoadCalendar) }
+        item { GoogleCalendarCard(ui, onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar) }
 
         if (!ui.account.loggedIn) {
             item {
@@ -693,12 +702,13 @@ private fun SecretaryTab(
     }
 }
 
-/** Google カレンダー連携カード。未連携なら接続ボタン、連携済みなら直近の予定を表示。 */
+/** Google カレンダー連携カード。複数アカウントを連携でき、既定の登録先を選んで予定をまとめて表示。 */
 @Composable
 private fun GoogleCalendarCard(
     ui: UiState,
     onConnectGoogle: () -> Unit,
-    onDisconnectGoogle: () -> Unit,
+    onDisconnectGoogle: (String) -> Unit,
+    onSetDefaultGoogle: (String) -> Unit,
     onLoadCalendar: () -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -724,7 +734,29 @@ private fun GoogleCalendarCard(
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
             } else {
-                Text("連携中: ${ui.googleEmail}", style = MaterialTheme.typography.bodySmall)
+                if (ui.googleEmails.size > 1) {
+                    Text("「カレンダーに追加」の登録先を選んでください。", style = MaterialTheme.typography.bodySmall)
+                }
+                ui.googleEmails.forEach { email ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = email == ui.googleDefault,
+                            onClick = { onSetDefaultGoogle(email) }
+                        )
+                        Text(
+                            email,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        TextButton(onClick = { onDisconnectGoogle(email) }) { Text("解除") }
+                    }
+                }
+                TextButton(onClick = onConnectGoogle) { Text("アカウントを追加") }
                 if (ui.calendarEvents.isEmpty()) {
                     Text(
                         if (ui.googleBusy) "読み込み中…" else "直近の予定はありません。",
@@ -732,10 +764,12 @@ private fun GoogleCalendarCard(
                     )
                 } else {
                     ui.calendarEvents.take(8).forEach { ev ->
-                        Text("・${ev.whenText}  ${ev.title}", style = MaterialTheme.typography.bodyMedium)
+                        val owner = if (ui.googleEmails.size > 1 && ev.accountEmail.isNotBlank()) {
+                            "（${ev.accountEmail.substringBefore('@')}）"
+                        } else ""
+                        Text("・${ev.whenText}  ${ev.title}$owner", style = MaterialTheme.typography.bodyMedium)
                     }
                 }
-                TextButton(onClick = onDisconnectGoogle) { Text("連携を解除") }
             }
         }
     }

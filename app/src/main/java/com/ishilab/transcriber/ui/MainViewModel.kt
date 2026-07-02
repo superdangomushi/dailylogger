@@ -52,11 +52,15 @@ data class UiState(
     val summary: String? = null,
     val summaryLoading: Boolean = false,
     val summaryError: String? = null,
-    // Google カレンダー連携
-    val googleEmail: String? = null,
+    // Google カレンダー連携（複数アカウント対応）
+    val googleEmails: List<String> = emptyList(),
+    /** 「カレンダーに追加」の登録先アカウント。 */
+    val googleDefault: String = "",
     val calendarEvents: List<CalendarEvent> = emptyList(),
     val googleBusy: Boolean = false,
     val googleMessage: String? = null,
+    /** あるアカウントの初回利用許可が必要なとき、起動すべき同意画面の Intent。 */
+    val googleConsentIntent: android.content.Intent? = null,
     // Moodle 連携
     val moodleUrl: String = "",
     val moodleBusy: Boolean = false,
@@ -76,13 +80,14 @@ data class UiState(
     val serverTranscribe: Boolean = false,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
-    val googleConnected: Boolean get() = googleEmail != null
+    val googleConnected: Boolean get() = googleEmails.isNotEmpty()
 }
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val modelManager = ModelManager(app)
     private val accountStore = AccountStore(app)
+    private val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(app)
     private val AIHelper = AiHelperClient()
 
     private val _ui = MutableStateFlow(UiState())
@@ -356,47 +361,71 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ---- Google カレンダー連携 ----
+    // ---- Google カレンダー連携（複数アカウント対応） ----
 
-    /**
-     * Google サインイン画面の結果を処理する。失敗理由（SHA-1 未登録の DEVELOPER_ERROR 等）を
-     * 握りつぶさず googleMessage に出す。成功時はアカウントを反映して予定を読み込む。
-     */
-    fun onGoogleSignInResult(data: android.content.Intent?) {
-        try {
-            val account = GoogleSignIn.getSignedInAccountFromIntent(data)
-                .getResult(com.google.android.gms.common.api.ApiException::class.java)
-            _ui.update { it.copy(googleEmail = account.email, googleMessage = null) }
-            refreshGoogle()
-        } catch (e: com.google.android.gms.common.api.ApiException) {
-            val hint = when (e.statusCode) {
-                com.google.android.gms.common.api.CommonStatusCodes.DEVELOPER_ERROR ->
-                    "設定エラー(10): Google Cloud Console にこのアプリの OAuth クライアント" +
-                        "（パッケージ名と SHA-1）が登録されていません"
-                com.google.android.gms.common.api.CommonStatusCodes.NETWORK_ERROR ->
-                    "ネットワークエラー。通信環境を確認してください"
-                com.google.android.gms.common.api.CommonStatusCodes.SIGN_IN_REQUIRED, 12501 ->
-                    "サインインがキャンセルされました"
-                else -> "サインイン失敗 (コード ${e.statusCode})"
-            }
-            _ui.update { it.copy(googleMessage = hint) }
+    /** システムのアカウント選択画面の結果を処理し、選ばれたアカウントを連携に追加する。 */
+    fun onGoogleAccountPicked(data: android.content.Intent?) {
+        val email = data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
+        if (email.isNullOrBlank()) return
+        googleStore.add(email)
+        _ui.update {
+            it.copy(
+                googleEmails = googleStore.emails,
+                googleDefault = googleStore.defaultEmail,
+                googleMessage = null,
+            )
+        }
+        loadCalendar() // 初回はここで利用許可（同意画面）が要求される
+        linkGoogleToServer()
+    }
+
+    /** 指定アカウントの連携を解除する。他の連携アカウントはそのまま残る。 */
+    fun disconnectGoogle(email: String) {
+        googleStore.remove(email)
+        _ui.update {
+            it.copy(
+                googleEmails = googleStore.emails,
+                googleDefault = googleStore.defaultEmail,
+                calendarEvents = it.calendarEvents.filter { ev -> ev.accountEmail != email },
+                googleMessage = "$email の連携を解除しました",
+            )
+        }
+        linkGoogleToServer()
+    }
+
+    /** 「カレンダーに追加」の登録先アカウントを選ぶ。 */
+    fun setDefaultGoogle(email: String) {
+        googleStore.defaultEmail = email
+        _ui.update { it.copy(googleDefault = googleStore.defaultEmail) }
+    }
+
+    /** 同意画面を起動したら呼ぶ（同じ Intent を繰り返し起動しないようにクリア）。 */
+    fun consentIntentLaunched() {
+        _ui.update { it.copy(googleConsentIntent = null) }
+    }
+
+    /** 保存済みの連携アカウントを反映（起動時・復帰時に呼ぶ）。 */
+    fun refreshGoogle() {
+        // 旧バージョン（Google サインイン方式）で連携していたアカウントを一度だけ移行する。
+        GoogleSignIn.getLastSignedInAccount(getApplication())?.email?.let { legacy ->
+            if (legacy !in googleStore.emails) googleStore.add(legacy)
+        }
+        _ui.update {
+            it.copy(googleEmails = googleStore.emails, googleDefault = googleStore.defaultEmail)
+        }
+        if (googleStore.emails.isNotEmpty()) {
+            loadCalendar()
+            linkGoogleToServer()
         }
     }
 
-    /** サインイン済みアカウントを反映（サインイン結果後・起動時に呼ぶ）。 */
-    fun refreshGoogle() {
-        val acc = GoogleSignIn.getLastSignedInAccount(getApplication())
-        _ui.update { it.copy(googleEmail = acc?.email) }
-        if (acc != null) {
-            loadCalendar()
-            // サーバーのアカウントにも Google メールを紐付ける（ログイン済みのときだけ）。
-            val gEmail = acc.email
-            if (accountStore.loggedIn && !gEmail.isNullOrBlank()) {
-                viewModelScope.launch {
-                    withContext(Dispatchers.IO) {
-                        AIHelper.linkGoogle(accountStore.baseUrl, accountStore.email, accountStore.token, gEmail)
-                    }
-                }
+    /** 連携中の Google メール一覧をサーバーのアカウントにも記録する（ログイン済みのときだけ）。 */
+    private fun linkGoogleToServer() {
+        if (!accountStore.loggedIn) return
+        val joined = googleStore.emails.joinToString(",")
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                AIHelper.linkGoogle(accountStore.baseUrl, accountStore.email, accountStore.token, joined)
             }
         }
     }
@@ -521,36 +550,47 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun onGoogleDisconnected() {
-        _ui.update { it.copy(googleEmail = null, calendarEvents = emptyList(), googleMessage = null) }
-    }
-
-    /** 直近の予定を読み込む。 */
+    /** 連携中の全アカウントから直近の予定を読み込み、開始時刻順にまとめて表示する。 */
     fun loadCalendar() {
         val app = getApplication<Application>()
-        val acc = GoogleSignIn.getLastSignedInAccount(app) ?: return
+        val emails = googleStore.emails
+        if (emails.isEmpty()) return
         _ui.update { it.copy(googleBusy = true, googleMessage = null) }
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val token = GoogleCalendarClient.accessToken(app, acc)
-                    GoogleCalendarClient.listUpcomingEvents(token).getOrThrow()
+            val all = mutableListOf<CalendarEvent>()
+            var consent: android.content.Intent? = null
+            var error: String? = null
+            withContext(Dispatchers.IO) {
+                for (email in emails) {
+                    try {
+                        val token = GoogleCalendarClient.accessToken(app, email)
+                        val events = GoogleCalendarClient.listUpcomingEvents(token).getOrThrow()
+                        all += events.map { it.copy(accountEmail = email) }
+                    } catch (e: com.google.android.gms.auth.UserRecoverableAuthException) {
+                        // このアカウントの初回利用許可が必要。同意画面の Intent を UI に渡して起動してもらう。
+                        consent = e.intent
+                        error = "$email のカレンダー利用許可が必要です"
+                    } catch (e: Exception) {
+                        error = "$email: ${e.message}"
+                    }
                 }
             }
-            result.fold(
-                onSuccess = { list -> _ui.update { it.copy(calendarEvents = list, googleBusy = false) } },
-                onFailure = { e ->
-                    _ui.update { it.copy(googleBusy = false, googleMessage = "カレンダー取得失敗: ${e.message}") }
-                }
-            )
+            _ui.update {
+                it.copy(
+                    calendarEvents = all.sortedBy { ev -> ev.startMillis },
+                    googleBusy = false,
+                    googleMessage = error,
+                    googleConsentIntent = consent,
+                )
+            }
         }
     }
 
-    /** 課題・予定の締切を Google カレンダーに登録する。 */
+    /** 課題・予定の締切を「既定」の Google アカウントのカレンダーに登録する。 */
     fun addTaskToCalendar(task: AiHelperClient.Task) {
         val app = getApplication<Application>()
-        val acc = GoogleSignIn.getLastSignedInAccount(app)
-        if (acc == null) {
+        val email = googleStore.defaultEmail
+        if (email.isBlank()) {
             _ui.update { it.copy(googleMessage = "先に Google 連携してください") }
             return
         }
@@ -558,17 +598,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    val token = GoogleCalendarClient.accessToken(app, acc)
+                    val token = GoogleCalendarClient.accessToken(app, email)
                     GoogleCalendarClient.insertDeadline(token, task.content, task.deadline, task.dateOnly).getOrThrow()
                 }
             }
             result.fold(
                 onSuccess = {
-                    _ui.update { it.copy(googleBusy = false, googleMessage = "「${task.content}」をカレンダーに登録しました") }
+                    _ui.update {
+                        it.copy(googleBusy = false, googleMessage = "「${task.content}」を $email のカレンダーに登録しました")
+                    }
                     loadCalendar()
                 },
                 onFailure = { e ->
-                    _ui.update { it.copy(googleBusy = false, googleMessage = "登録失敗: ${e.message}") }
+                    if (e is com.google.android.gms.auth.UserRecoverableAuthException) {
+                        _ui.update {
+                            it.copy(
+                                googleBusy = false,
+                                googleMessage = "$email のカレンダー利用許可が必要です",
+                                googleConsentIntent = e.intent,
+                            )
+                        }
+                    } else {
+                        _ui.update { it.copy(googleBusy = false, googleMessage = "登録失敗: ${e.message}") }
+                    }
                 }
             )
         }

@@ -1,10 +1,10 @@
 package com.ishilab.transcriber.google
 
+import android.accounts.Account
+import android.accounts.AccountManager
 import android.content.Context
+import android.content.Intent
 import com.google.android.gms.auth.GoogleAuthUtil
-import com.google.android.gms.auth.api.signin.GoogleSignInAccount
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.android.gms.common.api.Scope
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -13,11 +13,16 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Google カレンダーの予定1件（表示用）。 */
-data class CalendarEvent(val title: String, val whenText: String, val startMillis: Long)
+/** Google カレンダーの予定1件（表示用）。accountEmail はどの連携アカウント由来か。 */
+data class CalendarEvent(
+    val title: String,
+    val whenText: String,
+    val startMillis: Long,
+    val accountEmail: String = "",
+)
 
 /**
- * 端末で Google サインイン済みのアカウントを使って Google Calendar を読み書きする。
+ * 端末の Google アカウント（複数可）を使って Google Calendar を読み書きする。
  * 重い公式クライアントは使わず、アクセストークン＋Calendar v3 REST を直接叩く。
  * 通信はブロッキングなので必ず IO スレッドから呼ぶこと。
  */
@@ -27,18 +32,19 @@ object GoogleCalendarClient {
     const val SCOPE = "https://www.googleapis.com/auth/calendar.events"
     private const val API = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
 
-    /** Google サインインの要求内容（メール＋カレンダー予定スコープ）。 */
-    fun signInOptions(): GoogleSignInOptions =
-        GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestEmail()
-            .requestScopes(Scope(SCOPE))
-            .build()
+    /** 端末の Google アカウントを1つ選ばせるシステムのアカウント選択画面。何度でも呼べる。 */
+    fun chooseAccountIntent(): Intent =
+        AccountManager.newChooseAccountIntent(
+            null, null, arrayOf("com.google"), null, null, null, null
+        )
 
-    /** サインイン済みアカウントの OAuth アクセストークンを取得する（ブロッキング）。 */
-    fun accessToken(context: Context, account: GoogleSignInAccount): String {
-        val acc = account.account ?: error("Google アカウントが取得できません")
-        return GoogleAuthUtil.getToken(context, acc, "oauth2:$SCOPE")
-    }
+    /**
+     * 指定メールの Google アカウントの OAuth アクセストークンを取得する（ブロッキング）。
+     * そのアカウントで初回利用時は UserRecoverableAuthException が投げられるので、
+     * 呼び出し側で e.intent を起動して利用許可をもらってから再試行する。
+     */
+    fun accessToken(context: Context, email: String): String =
+        GoogleAuthUtil.getToken(context, Account(email, "com.google"), "oauth2:$SCOPE")
 
     /** 直近の予定を取得する。 */
     fun listUpcomingEvents(token: String, max: Int = 20): kotlin.Result<List<CalendarEvent>> {

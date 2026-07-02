@@ -418,7 +418,10 @@ app.get("/api/waseda/sync/status", async (req, res) => {
 function runWasedaScraper(account, job) {
   const { spawn } = require("child_process");
   const scriptDir = path.join(__dirname, "scraper");
-  const child = spawn(process.env.PYTHON_BIN || "python3", ["waseda_scraper.py"], {
+  // 依存(bs4/selenium)は venv に入れる想定（make python-deps）。あれば venv の python を使う。
+  const venvPython = path.join(scriptDir, ".venv", "bin", "python3");
+  const pythonBin = process.env.PYTHON_BIN || (fs.existsSync(venvPython) ? venvPython : "python3");
+  const child = spawn(pythonBin, ["waseda_scraper.py"], {
     cwd: scriptDir,
     env: {
       ...process.env,
