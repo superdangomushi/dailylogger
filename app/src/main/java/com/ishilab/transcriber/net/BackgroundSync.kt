@@ -1,23 +1,24 @@
 package com.ishilab.transcriber.net
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.ishilab.transcriber.MainActivity
+import com.ishilab.transcriber.audio.AudioChunker
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * 文字起こしファイルの「サーバー送信（成功するまでリトライ）」と、
+ * 文字起こしファイル/音声 outbox の「サーバー送信（成功するまでリトライ）」と、
  * サーバーからの「リマインドのローカル通知」を担う。
  *
  * 送信ポリシー:
- *  - 完了したファイル（＝現在書き込み中の時刻ファイル以外）だけを送る。
- *  - 送信に成功したファイル名は永続化し、二度送らない（サーバーは冪等だが無駄を省く）。
+ *  - 完了した文字起こしファイル（＝現在書き込み中の時刻ファイル以外）だけを送る。
+ *  - 送信に成功した文字起こしファイル名は永続化し、二度送らない（サーバーは冪等だが無駄を省く）。
+ *  - 音声アップロードに失敗して audio-outbox に退避された PCM は、成功したら削除する。
  *  - 失敗したものは [INTERVAL_MS]（5分）ごと、または [triggerNow] で即時に再送を試みる。
  *
  * ログイン済みのときだけ実働する。通信はブロッキングなので専用スレッドで回す。
@@ -30,6 +31,7 @@ class BackgroundSync(private val context: Context) {
 
     private val lock = Object()
     @Volatile private var thread: Thread? = null
+    @Volatile private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private val running = AtomicBoolean(false)
 
     /** 現在書き込み中の時刻ファイル名。これは「未完了」として送らない。null なら全て送る。 */
@@ -41,12 +43,14 @@ class BackgroundSync(private val context: Context) {
     fun start() {
         if (running.getAndSet(true)) return
         ensureChannel()
+        registerNetworkCallback()
         thread = Thread({ loop() }, "AIHelper-sync").also { it.start() }
         Log.i(TAG, "background sync started")
     }
 
     fun stop() {
         running.set(false)
+        unregisterNetworkCallback()
         synchronized(lock) { lock.notifyAll() }
         thread = null
     }
@@ -66,6 +70,7 @@ class BackgroundSync(private val context: Context) {
             try {
                 if (accountStore.loggedIn) {
                     uploadPending()
+                    uploadPendingAudio()
                     pollReminders()
                     syncCalendar()
                 }
@@ -93,11 +98,17 @@ class BackgroundSync(private val context: Context) {
         return dir.listFiles { f -> f.isFile && f.name.endsWith(".txt") }?.toList() ?: emptyList()
     }
 
-    /** まだ送っていない「完了ファイル」の数。 */
+    private fun audioOutboxFiles(): List<File> {
+        val dir = File(context.filesDir, "audio-outbox")
+        return dir.listFiles { f -> f.isFile && f.name.endsWith(".pcm") }?.toList() ?: emptyList()
+    }
+
+    /** まだ送っていない「完了ファイル/退避音声」の数。 */
     fun pendingCount(): Int {
         val sent = sentSet()
         val skip = currentHourFile
-        return transcriptFiles().count { it.name != skip && it.name !in sent }
+        val textPending = transcriptFiles().count { it.name != skip && it.name !in sent }
+        return textPending + audioOutboxFiles().size
     }
 
     /** 未送信の完了ファイルを送る。成功したら送信済みとして記録。 */
@@ -119,6 +130,34 @@ class BackgroundSync(private val context: Context) {
             saveSentSet(sent)
             Log.i(TAG, "uploaded $uploaded file(s)")
         }
+    }
+
+    /** 未送信の退避音声を WAV として送る。成功したファイルから端末内 outbox から削除する。 */
+    private fun uploadPendingAudio() {
+        var uploaded = 0
+        for (file in audioOutboxFiles().sortedBy { it.name }) {
+            val result = client.uploadAudioPcm(
+                accountStore.baseUrl,
+                accountStore.email,
+                accountStore.token,
+                file,
+                audioUploadName(file),
+                AudioChunker.SAMPLE_RATE,
+            )
+            if (result.isSuccess) {
+                if (file.delete()) uploaded++
+            } else {
+                Log.w(TAG, "audio outbox upload failed: ${result.exceptionOrNull()?.message}")
+                break
+            }
+        }
+        if (uploaded > 0) Log.i(TAG, "uploaded $uploaded audio outbox file(s)")
+    }
+
+    private fun audioUploadName(file: File): String {
+        val millis = file.name.removePrefix("seg-").removeSuffix(".pcm").toLongOrNull()
+            ?: file.lastModified()
+        return SimpleDateFormat("yyyy-MM-dd_HH", Locale.JAPAN).format(Date(millis)) + ".wav"
     }
 
     private fun sentSet(): Set<String> =
@@ -162,11 +201,35 @@ class BackgroundSync(private val context: Context) {
         ReminderNotifier.ensureChannel(context)
     }
 
+    private fun registerNetworkCallback() {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                triggerNow()
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+            networkCallback = callback
+        } catch (e: Exception) {
+            Log.w(TAG, "network callback registration failed: ${e.message}")
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        try {
+            cm.unregisterNetworkCallback(callback)
+        } catch (_: Exception) {
+        }
+    }
+
     companion object {
         private const val TAG = "BackgroundSync"
         private const val PREFS = "sync_prefs"
         private const val KEY_SENT = "sent_files"
-        private const val NOTIF_BASE = 2000
         // 再送の間隔（5分）。triggerNow でこの待機を打ち切って即時実行できる。
         private const val INTERVAL_MS = 5 * 60 * 1000L
     }

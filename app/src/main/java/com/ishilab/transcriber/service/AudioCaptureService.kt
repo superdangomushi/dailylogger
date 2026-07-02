@@ -59,7 +59,7 @@ class AudioCaptureService : Service() {
     private var engine: TranscriptionEngine? = null
     private lateinit var accountStore: com.ishilab.transcriber.net.AccountStore
     private val aiHelper = com.ishilab.transcriber.net.AiHelperClient()
-    // 送信に失敗した音声区間の退避先（次回のワーカー起動・次区間成功時に再送する）。
+    // 送信に失敗した音声区間の退避先（BackgroundSync が接続復帰時にまとめて再送する）。
     private lateinit var audioOutboxDir: File
 
     private lateinit var wakeLock: PowerManager.WakeLock
@@ -180,11 +180,11 @@ class AudioCaptureService : Service() {
             }
         }
         pushState { it.copy(active = false, paused = false, transcribing = false, recordingStartedElapsed = 0L) }
-        // 録音・文字起こしは止めるが、未送信ファイルの送信が終わるまで常駐を維持する。
+        // 録音・文字起こしは止めるが、未送信ファイル/音声の送信が終わるまで常駐を維持する。
         startDraining()
     }
 
-    /** 終了後、未送信の文字起こしファイルが全て送れるまで送信を続け、完了したら自分を止める。 */
+    /** 終了後、未送信の文字起こしファイル/音声が全て送れるまで送信を続け、完了したら自分を止める。 */
     private fun startDraining() {
         val sync = backgroundSync
         if (sync == null) {
@@ -363,7 +363,7 @@ class AudioCaptureService : Service() {
         if (serverMode) {
             pushState { it.copy(modelName = "サーバー処理（音声アップロード）") }
             updateNotification()
-            retryAudioOutbox() // 前回送れなかった区間があれば先に再送を試みる
+            backgroundSync?.triggerNow() // 前回送れなかった区間があれば同期ループで再送する
         } else {
             // モデル読み込み（利用者が選択したモデルを優先。未DLならDL済みの先頭）
             val model = modelManager.activeModel()
@@ -429,11 +429,11 @@ class AudioCaptureService : Service() {
                         lastText = "${seg.label} をサーバーへ送信しました（サーバーで文字起こし中）",
                     )
                 }
-                retryAudioOutbox() // 通信が生きているうちに滞留分も送る
+                backgroundSync?.triggerNow() // 通信が生きているうちに滞留分も送る
             } else {
                 // ファイル名に開始時刻が入っているので、そのまま outbox へ移して後で再送する。
-                val moved = File(audioOutboxDir, seg.file.name)
-                if (!seg.file.renameTo(moved)) seg.file.delete()
+                moveToAudioOutbox(seg.file)
+                backgroundSync?.triggerNow()
                 pushState {
                     it.copy(
                         transcribing = false, transcribeLabel = null,
@@ -445,17 +445,15 @@ class AudioCaptureService : Service() {
         }
     }
 
-    /** outbox に退避してある未送信の音声区間を再送する。 */
-    private fun retryAudioOutbox() {
-        val files = audioOutboxDir.listFiles { f -> f.isFile && f.name.endsWith(".pcm") } ?: return
-        for (f in files.sortedBy { it.name }) {
-            val millis = f.name.removePrefix("seg-").removeSuffix(".pcm").toLongOrNull() ?: 0L
-            val name = hourKey(if (millis > 0) millis else f.lastModified()) + ".wav"
-            val r = aiHelper.uploadAudioPcm(
-                accountStore.baseUrl, accountStore.email, accountStore.token,
-                f, name, AudioChunker.SAMPLE_RATE
-            )
-            if (r.isSuccess) f.delete() else break // 失敗したら通信不調とみなし今回は打ち切る
+    /** 区間ファイルを outbox に残す。rename が使えない場合だけコピーで退避する。 */
+    private fun moveToAudioOutbox(file: File) {
+        val moved = File(audioOutboxDir, file.name)
+        if (file.renameTo(moved)) return
+        try {
+            file.copyTo(moved, overwrite = true)
+            file.delete()
+        } catch (e: Exception) {
+            Log.w(TAG, "failed to move audio segment to outbox: ${e.message}")
         }
     }
 

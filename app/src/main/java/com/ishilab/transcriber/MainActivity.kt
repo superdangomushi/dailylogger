@@ -152,6 +152,8 @@ class MainActivity : ComponentActivity() {
                         onLoadChatHistory = viewModel::loadChatHistory,
                         onLoadTasks = { viewModel.loadTasks() },
                         onToggleTask = viewModel::toggleTaskDone,
+                        onUpdateTask = viewModel::updateTask,
+                        onDeleteTask = viewModel::deleteTask,
                         onSetShowDone = { viewModel.loadTasks(it) },
                         onLoadSummary = viewModel::loadSummary,
                         onGenerateSummary = viewModel::generateSummary,
@@ -178,6 +180,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refresh()
+        viewModel.loadTasks()
+        viewModel.loadCourses()
         viewModel.refreshGoogle()
     }
 
@@ -214,6 +218,8 @@ private fun MainScreen(
     onLoadChatHistory: () -> Unit,
     onLoadTasks: () -> Unit,
     onToggleTask: (AiHelperClient.Task) -> Unit,
+    onUpdateTask: (AiHelperClient.Task, String, String, String, String) -> Unit,
+    onDeleteTask: (AiHelperClient.Task) -> Unit,
     onSetShowDone: (Boolean) -> Unit,
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
@@ -252,8 +258,8 @@ private fun MainScreen(
                     1 -> RecordsTab(ui, onRefresh, onSend, onLoadServerTranscripts, onLoadServerTranscript)
                     2 -> CalendarTab(ui, onLoadDaySummary)
                     else -> SecretaryTab(
-                        ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask, onSetShowDone,
-                        onLoadSummary, onGenerateSummary,
+                        ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask,
+                        onUpdateTask, onDeleteTask, onSetShowDone, onLoadSummary, onGenerateSummary,
                         onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar, onAddToCalendar,
                         onLoadMoodle, onSaveMoodleUrl, onSyncMoodle, onLoadWaseda, onSaveWaseda, onSyncWaseda
                     )
@@ -665,6 +671,40 @@ private fun TranscriptDetail(
 
 private data class CalItem(val date: LocalDate, val time: String, val title: String)
 
+private val DowJa = listOf("月", "火", "水", "木", "金", "土", "日")
+private val PeriodStartTimes = mapOf(
+    1 to "09:00", 2 to "10:55", 3 to "13:15", 4 to "15:10",
+    5 to "17:05", 6 to "18:55", 7 to "20:45"
+)
+
+private fun courseTermRange(term: String, ref: LocalDate): Pair<LocalDate, LocalDate> {
+    val ay = if (ref.monthValue >= 4) ref.year else ref.year - 1
+    fun d(year: Int, month: Int, day: Int) = LocalDate.of(year, month, day)
+    return when {
+        term.contains("通年") -> d(ay, 4, 1) to d(ay + 1, 1, 31)
+        term.contains("春") && (term.contains("Q") || term.contains("クォーター")) ->
+            d(ay, 4, 1) to d(ay, 6, 15)
+        term.contains("夏") -> d(ay, 8, 1) to d(ay, 9, 15)
+        term.contains("秋") && (term.contains("Q") || term.contains("クォーター")) ->
+            d(ay, 9, 1) to d(ay, 11, 15)
+        term.contains("冬") -> d(ay, 11, 16) to d(ay + 1, 1, 31)
+        term.contains("春") -> d(ay, 4, 1) to d(ay, 7, 31)
+        term.contains("秋") -> d(ay, 9, 1) to d(ay + 1, 1, 31)
+        else -> d(ay, 4, 1) to d(ay + 1, 1, 31)
+    }
+}
+
+private fun courseOccursOn(course: AiHelperClient.Course, date: LocalDate): Boolean {
+    if (course.day.isBlank()) return false
+    val (start, end) = courseTermRange(course.term, date)
+    return !date.isBefore(start) && !date.isAfter(end) && DowJa[date.dayOfWeek.value - 1] == course.day
+}
+
+private fun courseTime(course: AiHelperClient.Course): String =
+    course.startTime.takeIf { it.length >= 5 }?.take(5)
+        ?: course.period?.let { PeriodStartTimes[it] }
+        ?: ""
+
 /** 月カレンダー。日付をタップするとその日の予定・時間・（あれば）要約を表示。 */
 @Composable
 private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
@@ -673,8 +713,8 @@ private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
     val ym = runCatching { YearMonth.parse(ymStr) }.getOrDefault(YearMonth.now())
     val selected = runCatching { LocalDate.parse(selectedStr) }.getOrDefault(LocalDate.now())
 
-    // 課題・予定 + Google カレンダー予定を日付ごとにまとめる。
-    val byDate = remember(ui.tasks, ui.calendarEvents) {
+    // 課題・予定 + Google カレンダー予定 + Waseda 授業予定を日付ごとにまとめる。
+    val byDate = remember(ui.tasks, ui.calendarEvents, ui.courses, ymStr) {
         val list = mutableListOf<CalItem>()
         ui.tasks.forEach { t ->
             val dl = t.deadline
@@ -694,6 +734,16 @@ private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
                 val norm = ev.whenText.replace('T', ' ')
                 val time = if (norm.length >= 16) norm.substring(11, 16) else ""
                 list.add(CalItem(d, time, "[カレンダー] ${ev.title}"))
+            }
+        }
+        for (day in 1..ym.lengthOfMonth()) {
+            val date = ym.atDay(day)
+            ui.courses.forEach { c ->
+                if (courseOccursOn(c, date)) {
+                    val room = if (c.room.isNotBlank()) " (${c.room})" else ""
+                    val period = c.period?.let { "${it}限 " }.orEmpty()
+                    list.add(CalItem(date, courseTime(c), "[授業] $period${c.name}$room"))
+                }
             }
         }
         list.groupBy { it.date }
@@ -775,6 +825,12 @@ private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
+        if (ui.coursesLoading) {
+            item { Text("時間割を読み込み中…", style = MaterialTheme.typography.bodySmall) }
+        }
+        ui.coursesError?.let { err ->
+            item { Text("時間割の取得エラー: $err", color = MaterialTheme.colorScheme.error) }
+        }
         val dayItems = (byDate[selected] ?: emptyList()).sortedBy { it.time.ifBlank { "99:99" } }
         if (dayItems.isEmpty()) {
             item { Text("予定はありません。", style = MaterialTheme.typography.bodySmall) }
@@ -812,6 +868,8 @@ private fun SecretaryTab(
     onAsk: (String) -> Unit,
     onLoadTasks: () -> Unit,
     onToggleTask: (AiHelperClient.Task) -> Unit,
+    onUpdateTask: (AiHelperClient.Task, String, String, String, String) -> Unit,
+    onDeleteTask: (AiHelperClient.Task) -> Unit,
     onSetShowDone: (Boolean) -> Unit,
     onLoadSummary: () -> Unit,
     onGenerateSummary: () -> Unit,
@@ -884,7 +942,14 @@ private fun SecretaryTab(
                 Text("表示できる予定・課題はありません。", style = MaterialTheme.typography.bodySmall)
             }
             else -> items(ui.tasks) { task ->
-                TaskCard(task, onToggleTask, if (ui.googleConnected) onAddToCalendar else null)
+                TaskCard(
+                    task = task,
+                    actionInProgress = ui.taskActionInProgressId == task.id,
+                    onToggleTask = onToggleTask,
+                    onUpdateTask = onUpdateTask,
+                    onDeleteTask = onDeleteTask,
+                    onAddToCalendar = if (ui.googleConnected) onAddToCalendar else null,
+                )
             }
         }
 
@@ -1120,18 +1185,41 @@ private fun SummaryCard(
 @Composable
 private fun TaskCard(
     task: AiHelperClient.Task,
+    actionInProgress: Boolean,
     onToggleTask: (AiHelperClient.Task) -> Unit,
+    onUpdateTask: (AiHelperClient.Task, String, String, String, String) -> Unit,
+    onDeleteTask: (AiHelperClient.Task) -> Unit,
     onAddToCalendar: ((AiHelperClient.Task) -> Unit)? = null,
 ) {
+    var editing by rememberSaveable(task.id) { mutableStateOf(false) }
     val isYotei = task.type == "yotei"
     val label = if (isYotei) "予定" else "課題"
     val labelColor = if (isYotei) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
+    if (editing) {
+        TaskEditDialog(
+            task = task,
+            saving = actionInProgress,
+            onDismiss = { editing = false },
+            onSave = { type, content, details, deadline ->
+                onUpdateTask(task, type, content, details, deadline)
+                editing = false
+            },
+            onDelete = {
+                onDeleteTask(task)
+                editing = false
+            },
+        )
+    }
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(12.dp).fillMaxWidth(),
             verticalAlignment = Alignment.Top
         ) {
-            Checkbox(checked = task.done, onCheckedChange = { onToggleTask(task) })
+            Checkbox(
+                checked = task.done,
+                enabled = !actionInProgress,
+                onCheckedChange = { onToggleTask(task) },
+            )
             Column(modifier = Modifier.padding(start = 4.dp)) {
                 Text("[$label]", color = labelColor, style = MaterialTheme.typography.labelMedium)
                 Text(
@@ -1150,12 +1238,102 @@ private fun TaskCard(
                 if (onAddToCalendar != null && !task.deadline.isNullOrBlank()) {
                     TextButton(
                         onClick = { onAddToCalendar(task) },
+                        enabled = !actionInProgress,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
                     ) { Text("カレンダーに追加") }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        onClick = { editing = true },
+                        enabled = !actionInProgress,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                    ) { Text("編集") }
+                    if (actionInProgress) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun TaskEditDialog(
+    task: AiHelperClient.Task,
+    saving: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (String, String, String, String) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var type by rememberSaveable(task.id) { mutableStateOf(task.type) }
+    var content by rememberSaveable(task.id) { mutableStateOf(task.content) }
+    var details by rememberSaveable(task.id) { mutableStateOf(task.details) }
+    var deadline by rememberSaveable(task.id) { mutableStateOf(editableDeadline(task.deadline, task.dateOnly)) }
+
+    Dialog(onDismissRequest = { if (!saving) onDismiss() }) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 8.dp,
+            shadowElevation = 10.dp,
+            modifier = Modifier.fillMaxWidth().widthIn(max = 560.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("予定・課題を編集", style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = type != "yotei", onClick = { type = "kadai" }, enabled = !saving)
+                    Text("課題", modifier = Modifier.padding(end = 12.dp))
+                    RadioButton(selected = type == "yotei", onClick = { type = "yotei" }, enabled = !saving)
+                    Text("予定")
+                }
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it },
+                    label = { Text("内容") },
+                    enabled = !saving,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = deadline,
+                    onValueChange = { deadline = it },
+                    label = { Text("期限（YYYY-MM-DD または YYYY-MM-DD HH:MM）") },
+                    enabled = !saving,
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = details,
+                    onValueChange = { details = it },
+                    label = { Text("詳細") },
+                    enabled = !saving,
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(onClick = onDelete, enabled = !saving) { Text("削除") }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = onDismiss, enabled = !saving) { Text("キャンセル") }
+                        Button(
+                            onClick = { onSave(type, content, details, deadline) },
+                            enabled = !saving && content.trim().isNotEmpty()
+                        ) { Text(if (saving) "保存中…" else "保存") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun editableDeadline(deadline: String?, dateOnly: Boolean): String {
+    if (deadline.isNullOrBlank()) return ""
+    val s = deadline.replace('T', ' ')
+    return if (dateOnly) s.take(10) else s.take(16)
 }
 
 /** サーバーの deadline 文字列を "YYYY-MM-DD HH:MM"（日付のみなら日付）へ整形。 */

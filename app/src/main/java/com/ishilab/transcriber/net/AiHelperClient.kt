@@ -36,6 +36,18 @@ class AiHelperClient {
         val done: Boolean,
     )
 
+    /** Waseda から取り込んだ授業予定の1件。 */
+    data class Course(
+        val id: Long,
+        val term: String,
+        val day: String,
+        val period: Int?,
+        val name: String,
+        val room: String,
+        val startTime: String,
+        val endTime: String,
+    )
+
     /** サーバーに保存された文字起こし一覧の1件。 */
     data class ServerTranscript(
         val id: Long,
@@ -90,6 +102,40 @@ class AiHelperClient {
                         deadline = o.optString("deadline_at").ifBlank { null },
                         dateOnly = o.optInt("date_only", 0) == 1 || o.optBoolean("date_only", false),
                         done = o.optString("status") == "done",
+                    )
+                }
+            } else {
+                throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+            }
+        }
+    }
+
+    /** サーバーに保存された時間割を取得する。 */
+    fun fetchCourses(baseUrl: String, email: String, token: String): kotlin.Result<List<Course>> {
+        val path = "/api/courses?email=${enc(email)}&token=${enc(token)}"
+        val url = endpoint(baseUrl, path)
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                setRequestProperty("Accept", "application/json")
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) {
+                val arr = json.optJSONArray("courses") ?: JSONArray()
+                (0 until arr.length()).map { i ->
+                    val o = arr.getJSONObject(i)
+                    Course(
+                        id = o.optLong("id"),
+                        term = o.optString("term"),
+                        day = o.optString("day"),
+                        period = if (o.isNull("period")) null else o.optInt("period"),
+                        name = o.optString("name"),
+                        room = o.optString("room"),
+                        startTime = o.optString("start_time"),
+                        endTime = o.optString("end_time"),
                     )
                 }
             } else {

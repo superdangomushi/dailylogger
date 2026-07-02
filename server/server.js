@@ -837,9 +837,14 @@ app.post("/api/upload", async (req, res) => {
       const result = await gemini.analyze(content);
       await db.saveAnalysis(id, result.kadai, result.yotei, result.summary);
       await db.upsertTasks(account.email, result.tasks, id);
+      const updated = await db.applyTaskUpdates(account.email, result.updates);
+      const canceled = await db.cancelTasks(account.email, result.cancellations);
       taskCount = result.tasks.length;
       analyzed = true;
-      console.log(`解析: ${safeName} -> タスク ${taskCount} 件 / 要約 ${result.summary ? "有" : "無"}`);
+      console.log(
+        `解析: ${safeName} -> タスク ${taskCount} 件 / 変更 ${updated.length} 件 / 削除 ${canceled.length} 件 / ` +
+          `要約 ${result.summary ? "有" : "無"}`
+      );
     } catch (e) {
       console.error(`Gemini 解析に失敗 (${safeName}):`, e.message);
     }
@@ -966,7 +971,7 @@ app.post("/api/ask", async (req, res) => {
     for (const a of result.actions) {
       if (a.op === "add_task" && a.content) {
         await db.addTask(account.email, {
-          type: a.type,
+          type: a.type || "kadai",
           content: a.content,
           details: a.details,
           deadline_at: a.deadline_at,
@@ -978,6 +983,30 @@ app.post("/api/ask", async (req, res) => {
         if (target) {
           await db.setTaskStatus(target.id, "done");
           applied.push({ op: "complete_task", id: target.id, content: target.content });
+        }
+      } else if (a.op === "delete_task" && a.target) {
+        const target = resolveTaskTarget(tasks, a.target);
+        if (target) {
+          await db.deleteTask(target.id, account.email);
+          applied.push({ op: "delete_task", id: target.id, content: target.content });
+        }
+      } else if (a.op === "update_task" && a.target) {
+        const target = resolveTaskTarget(tasks, a.target);
+        if (target) {
+          const nextDeadline = a.deadline_at || target.deadline_at || null;
+          await db.updateTask(account.email, target.id, {
+            type: a.type || target.type,
+            content: a.content || target.content,
+            details: a.details || target.details || "",
+            deadline_at: nextDeadline,
+            date_only: a.deadline_at ? a.date_only : !!target.date_only,
+          });
+          applied.push({
+            op: "update_task",
+            id: target.id,
+            content: a.content || target.content,
+            deadline_at: nextDeadline,
+          });
         }
       }
     }
@@ -1300,37 +1329,8 @@ async function serveAnalysisCsv(req, res, kind, label) {
 // =====================================================================
 // ダッシュボード
 // =====================================================================
-app.get("/", async (_req, res) => {
-  let rows = [];
-  try {
-    rows = await db.listTranscripts();
-  } catch (e) {
-    return res.status(500).type("text/plain").send("DB 接続エラー: " + e.message);
-  }
-
-  const tableRows = rows.length
-    ? rows
-        .map((r) => {
-          const analyzed = Boolean(r.analyzed_at);
-          const csvLinks = analyzed
-            ? `<a class="dl csv" href="/kadai/${r.id}.csv">課題CSV</a>
-               <a class="dl csv" href="/yotei/${r.id}.csv">予定CSV</a>`
-            : `<span class="pending">未解析</span>`;
-          return `
-        <tr>
-          <td>${escapeHtml(r.email)}</td>
-          <td>${escapeHtml(r.filename)}</td>
-          <td class="num">${r.chars}</td>
-          <td>${new Date(r.updated_at).toLocaleString("ja-JP")}</td>
-          <td><button class="small" onclick="viewText(${r.id})">本文</button>
-              <a class="dl" href="/download/${r.id}">DL</a></td>
-          <td>${csvLinks}</td>
-        </tr>`;
-        })
-        .join("")
-    : `<tr><td colspan="6" class="empty">まだファイルがありません。</td></tr>`;
-
-  res.type("text/html").send(renderDashboard(tableRows));
+app.get("/", (_req, res) => {
+  res.type("text/html").send(renderDashboard());
 });
 
 // ブラウザ内で本文を確認するための JSON 取得（ダッシュボードのモーダル用）。
@@ -1402,7 +1402,7 @@ function scheduleDailySummary() {
   }, delay);
 }
 
-function renderDashboard(tableRows) {
+function renderDashboard() {
   return `<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1647,10 +1647,7 @@ function renderDashboard(tableRows) {
         <div id="audioJobs"><p class="muted">読み込み中…</p></div>
         <hr>
         <h2>受信した文字起こしファイル</h2>
-        <table>
-          <thead><tr><th>アカウント</th><th>ファイル名</th><th>文字数</th><th>更新</th><th></th><th>課題/予定</th></tr></thead>
-          <tbody>${tableRows}</tbody>
-        </table>
+        <div id="transcripts"><p class="muted">読み込み中…</p></div>
       </section>
 
       <section class="card panel" data-panel="account">
@@ -1745,6 +1742,53 @@ function renderDashboard(tableRows) {
     let auth = JSON.parse(localStorage.getItem('mb_auth') || '{}');
     function headers(){ return { 'Content-Type':'application/json',
       'X-Account-Email': auth.email||'', 'Authorization':'Bearer '+(auth.token||'') }; }
+    const AUTO_REFRESH_MS = 15000;
+    const GOOGLE_REFRESH_MS = 60000;
+    let activeTab = 'chat';
+    let autoRefreshTimer = null;
+    let audioJobsTimer = null;
+    let autoRefreshBusy = false;
+    let lastGoogleRefresh = 0;
+    function activeControl(){
+      const el = document.activeElement;
+      return el && ['INPUT','TEXTAREA','SELECT'].includes(el.tagName);
+    }
+    function startAutoRefresh(){
+      stopAutoRefresh();
+      autoRefreshTimer = setInterval(() => refreshCurrentTab(), AUTO_REFRESH_MS);
+      document.addEventListener('visibilitychange', refreshWhenVisible);
+    }
+    function stopAutoRefresh(){
+      if(autoRefreshTimer) clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+      if(audioJobsTimer) clearTimeout(audioJobsTimer);
+      audioJobsTimer = null;
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    }
+    function refreshWhenVisible(){
+      if(!document.hidden) refreshCurrentTab(true);
+    }
+    async function refreshGoogleEvents(force){
+      const now = Date.now();
+      if(!force && now - lastGoogleRefresh < GOOGLE_REFRESH_MS) return;
+      lastGoogleRefresh = now;
+      await loadGoogleEvents();
+    }
+    async function refreshCurrentTab(force){
+      if(!auth.email || autoRefreshBusy) return;
+      if(!force && (document.hidden || activeControl())) return;
+      autoRefreshBusy = true;
+      try {
+        if(activeTab === 'chat') await loadChatHistory();
+        else if(activeTab === 'tasks') { await loadTasks(); await refreshGoogleEvents(false); }
+        else if(activeTab === 'calendar') { await loadTasks(); await refreshGoogleEvents(false); }
+        else if(activeTab === 'summary') await loadSummary();
+        else if(activeTab === 'files') { await loadDocs(); await loadAudioJobs(); await loadTranscripts(); }
+      } catch(e) {
+      } finally {
+        autoRefreshBusy = false;
+      }
+    }
 
     let allGoogleEvents = [];
     let allCourses = [];
@@ -1944,8 +1988,10 @@ function renderDashboard(tableRows) {
       else $('authState').textContent = '✗ ' + (j.error || (authMode==='register'?'登録失敗':'ログイン失敗'));
     }
     function showTab(name){
+      activeTab = name;
       document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
       document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
+      refreshCurrentTab(true);
     }
     function initAuth(){ if(auth.email && auth.token) onAuthed(); }
     function onAuthed(){
@@ -1954,6 +2000,7 @@ function renderDashboard(tableRows) {
       $('accEmail').textContent = auth.email || '';
       showTab('chat');
       loadAll();
+      startAutoRefresh();
       // Google OAuth から戻ってきた直後は、アカウントタブを開いて結果を表示する。
       const gq = new URLSearchParams(location.search).get('google');
       if(gq){
@@ -1966,6 +2013,7 @@ function renderDashboard(tableRows) {
       }
     }
     function logout(){
+      stopAutoRefresh();
       auth = {}; localStorage.removeItem('mb_auth');
       $('app').style.display = 'none'; $('login').style.display = '';
       $('password').value = ''; hideForm();
@@ -1979,7 +2027,7 @@ function renderDashboard(tableRows) {
       if(j.ok){ $('pwState').textContent='✓ 変更しました'; $('curpw').value=$('newpw').value=''; }
       else $('pwState').textContent = '✗ ' + (j.error||'変更失敗');
     }
-    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioJobs(); loadGoogle(); loadChatHistory(); }
+    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioJobs(); loadTranscripts(); loadGoogle(); loadChatHistory(); }
 
     // ---- Google カレンダー連携（Web OAuth） ----
     let googleAccounts = [];
@@ -2017,6 +2065,7 @@ function renderDashboard(tableRows) {
       } catch(e){}
     }
     async function loadGoogleEvents(){
+      lastGoogleRefresh = Date.now();
       // Fetch events from server even if no Google accounts are linked,
       // because the server also merges and returns smartphone local calendar events.
       try {
@@ -2073,6 +2122,8 @@ function renderDashboard(tableRows) {
     const AUDIO_STATUS = { queued:'待機中', processing:'処理中', done:'完了', error:'失敗' };
     async function loadAudioJobs(){
       if(!auth.email) return;
+      if(audioJobsTimer) clearTimeout(audioJobsTimer);
+      audioJobsTimer = null;
       try {
         const r = await fetch('/api/audio/jobs',{headers:headers()});
         const j = await r.json();
@@ -2084,7 +2135,7 @@ function renderDashboard(tableRows) {
           '<td>'+new Date(a.updated_at).toLocaleString('ja-JP')+'</td></tr>').join('');
         $('audioJobs').innerHTML = '<table><thead><tr><th>ファイル</th><th>サイズ</th><th>状態</th><th>更新</th></tr></thead><tbody>'+rows+'</tbody></table>';
         // 未完了ジョブがあれば少し待って自動更新。
-        if(j.jobs.some(a => a.status==='queued'||a.status==='processing')) setTimeout(loadAudioJobs, 15000);
+        if(j.jobs.some(a => a.status==='queued'||a.status==='processing')) audioJobsTimer = setTimeout(loadAudioJobs, 15000);
       } catch(e){}
     }
 
@@ -2310,16 +2361,54 @@ function renderDashboard(tableRows) {
       else $('moodleState').textContent = '✗ '+(j.error||'同期失敗');
     }
 
+    // ---- 文字起こし一覧 ----
+    async function loadTranscripts(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/transcripts?limit=100',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok){
+          $('transcripts').innerHTML = '<p class="muted">'+escapeHtml(j.error||'取得に失敗しました')+'</p>';
+          return;
+        }
+        const list = Array.isArray(j.transcripts) ? j.transcripts : [];
+        if(!list.length){
+          $('transcripts').innerHTML = '<p class="muted">まだファイルがありません。</p>';
+          return;
+        }
+        const rows = list.map(t => {
+          const analyzed = !!t.analyzed_at;
+          const csvLinks = analyzed
+            ? '<a class="dl csv" href="/kadai/'+t.id+'.csv">課題CSV</a> <a class="dl csv" href="/yotei/'+t.id+'.csv">予定CSV</a>'
+            : '<span class="pending">未解析</span>';
+          return '<tr>'+
+            '<td>'+escapeHtml(t.filename)+'</td>'+
+            '<td class="num">'+(t.chars || 0)+'</td>'+
+            '<td>'+new Date(t.updated_at).toLocaleString('ja-JP')+'</td>'+
+            '<td><button class="small" onclick="viewText('+t.id+')">本文</button> '+
+            '<a class="dl" href="/download/'+t.id+'">DL</a></td>'+
+            '<td>'+csvLinks+'</td>'+
+          '</tr>';
+        }).join('');
+        $('transcripts').innerHTML =
+          '<table><thead><tr><th>ファイル名</th><th>文字数</th><th>更新</th><th></th><th>課題/予定</th></tr></thead>'+
+          '<tbody>'+rows+'</tbody></table>';
+      } catch(e){
+        $('transcripts').innerHTML = '<p class="muted">取得に失敗しました。</p>';
+      }
+    }
+
     // ---- 本文表示（モーダル） ----
     async function viewText(id){
       $('modalTitle').textContent = '読み込み中…'; $('modalBody').textContent = '';
       $('modal').style.display = 'flex';
       try {
-        const r = await fetch('/api/transcript/'+id, {headers: headers()});
+        const r = await fetch('/api/transcripts/'+id, {headers: headers()});
         const j = await r.json();
         if(j.ok){
-          $('modalTitle').textContent = j.filename;
-          $('modalBody').textContent = (j.summary ? '【要約】\\n'+j.summary+'\\n\\n【本文】\\n' : '') + j.content;
+          const t = j.transcript || {};
+          $('modalTitle').textContent = t.filename || '';
+          $('modalBody').textContent = (t.summary ? '【要約】\\n'+t.summary+'\\n\\n【本文】\\n' : '') + (t.content || '');
         } else { $('modalTitle').textContent = 'エラー'; $('modalBody').textContent = j.error||''; }
       } catch(e){ $('modalTitle').textContent='通信エラー'; }
     }
@@ -2355,7 +2444,11 @@ function renderDashboard(tableRows) {
           if(Array.isArray(j.applied) && j.applied.length){
             bubble(j.applied.map(a => a.op==='add_task'
               ? '✓ 登録: '+(a.type==='yotei'?'予定':'課題')+'「'+a.content+'」'+(a.deadline_at?'（期限 '+String(a.deadline_at).slice(0,16).replace('T',' ')+'）':'（期限未設定）')
-              : '✓ 完了: 「'+(a.content||'')+'」').join('\\n'), 'bot');
+              : (a.op==='delete_task'
+                ? '✓ 削除: 「'+(a.content||'')+'」'
+                : (a.op==='update_task'
+                  ? '✓ 変更: 「'+(a.content||'')+'」'+(a.deadline_at?'（'+String(a.deadline_at).slice(0,16).replace('T',' ')+'）':'')
+                  : '✓ 完了: 「'+(a.content||'')+'」'))).join('\\n'), 'bot');
           }
           loadTasks();
         }

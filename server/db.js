@@ -410,6 +410,10 @@ function dedupKey(email, type, content, deadlineAt) {
     .digest("hex");
 }
 
+function escapeLike(s) {
+  return String(s || "").replace(/[\\%_]/g, (m) => `\\${m}`);
+}
+
 // 抽出した課題・予定を1件ずつ upsert する。
 // item: { type, content, details, deadline_at(null可), date_only }
 // 既存（同一 dedup_key）なら詳細などを更新しつつ、完了状態と通知済みフラグは維持する。
@@ -435,6 +439,94 @@ async function upsertTasks(email, items, sourceId) {
   for (const it of items || []) {
     await upsertTask(email, it, sourceId);
   }
+}
+
+// 音声/文字起こし中の「明日の〇〇なしで」「やっぱり△△キャンセル」などを反映する。
+// 事故防止のため target が空の取り消し指示は無視し、未完了の一致候補だけを物理削除する。
+async function cancelTasks(email, cancellations) {
+  const canceled = [];
+  for (const c of cancellations || []) {
+    const target = String(c.target || "").trim().slice(0, 512);
+    if (!target) continue;
+
+    const where = ["email = ?", "status = 'pending'", "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')"];
+    const args = [email, `%${escapeLike(target)}%`, `%${escapeLike(target)}%`];
+    if (c.type === "kadai" || c.type === "yotei") {
+      where.push("type = ?");
+      args.push(c.type);
+    }
+    if (c.deadline_at) {
+      where.push("deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)");
+      args.push(c.deadline_at);
+    }
+
+    const [rows] = await pool.query(
+      `SELECT id, type, content, details, deadline_at, date_only
+       FROM tasks
+       WHERE ${where.join(" AND ")}
+       ORDER BY
+         CASE WHEN content = ? THEN 0 ELSE 1 END,
+         (deadline_at IS NULL),
+         ABS(TIMESTAMPDIFF(MINUTE, COALESCE(deadline_at, NOW()), COALESCE(?, deadline_at, NOW()))),
+         id DESC
+       LIMIT 5`,
+      [...args, target, c.deadline_at || null]
+    );
+    if (!rows.length) continue;
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    await pool.query(`DELETE FROM tasks WHERE email = ? AND id IN (${placeholders})`, [email, ...ids]);
+    canceled.push(...rows);
+  }
+  return canceled;
+}
+
+// 音声/文字起こし中の「〇〇を15時に変更」「△△は明後日に変更ね」などを反映する。
+// target が空、または変更内容が空の場合は無視する。候補が複数あっても最上位1件だけ更新する。
+async function applyTaskUpdates(email, updates) {
+  const updated = [];
+  for (const u of updates || []) {
+    const target = String(u.target || "").trim().slice(0, 512);
+    if (!target) continue;
+
+    const where = ["email = ?", "status = 'pending'", "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')"];
+    const args = [email, `%${escapeLike(target)}%`, `%${escapeLike(target)}%`];
+    if (u.type === "kadai" || u.type === "yotei") {
+      where.push("type = ?");
+      args.push(u.type);
+    }
+    if (u.deadline_at) {
+      where.push("deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)");
+      args.push(u.deadline_at);
+    }
+
+    const [rows] = await pool.query(
+      `SELECT id, type, content, details, deadline_at, date_only
+       FROM tasks
+       WHERE ${where.join(" AND ")}
+       ORDER BY
+         CASE WHEN content = ? THEN 0 ELSE 1 END,
+         (deadline_at IS NULL),
+         ABS(TIMESTAMPDIFF(MINUTE, COALESCE(deadline_at, NOW()), COALESCE(?, deadline_at, NOW()))),
+         id DESC
+       LIMIT 1`,
+      [...args, target, u.deadline_at || null]
+    );
+    const row = rows[0];
+    if (!row) continue;
+
+    const next = {
+      type: u.new_type === "kadai" || u.new_type === "yotei" ? u.new_type : row.type,
+      content: String(u.new_content || row.content || "").trim(),
+      details: u.new_details ? String(u.new_details).trim() : (row.details || ""),
+      deadline_at: u.new_deadline_at || row.deadline_at || null,
+      date_only: u.new_deadline_at ? !!u.new_date_only : !!row.date_only,
+    };
+    const ok = await updateTask(email, row.id, next);
+    if (ok) updated.push({ before: row, after: { id: row.id, ...next } });
+  }
+  return updated;
 }
 
 // 手動でタスクを追加する（Web のフォームなどから）。
@@ -919,6 +1011,8 @@ module.exports = {
   listRecentChatMessages,
   // tasks
   upsertTasks,
+  cancelTasks,
+  applyTaskUpdates,
   addTask,
   listUpcomingTasks,
   setTaskStatus,

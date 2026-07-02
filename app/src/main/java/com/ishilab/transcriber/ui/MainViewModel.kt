@@ -56,6 +56,9 @@ data class UiState(
     val tasksError: String? = null,
     val taskActionInProgressId: Long? = null,
     val showDoneTasks: Boolean = false,
+    val courses: List<AiHelperClient.Course> = emptyList(),
+    val coursesLoading: Boolean = false,
+    val coursesError: String? = null,
     val summary: String? = null,
     val summaryLoading: Boolean = false,
     val summaryError: String? = null,
@@ -106,6 +109,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // ログイン済みで起動した場合もカレンダー・予定タブにデータが出るよう最初に読み込む。
         if (accountStore.loggedIn) {
             loadTasks()
+            loadCourses()
             loadSummary()
             loadServerTranscripts()
             loadChatHistory()
@@ -191,6 +195,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         it.copy(loginInProgress = false, loginError = null, account = currentAccount())
                     }
                     loadTasks()
+                    loadCourses()
                     loadSummary()
                     loadServerTranscripts()
                     loadChatHistory()
@@ -212,6 +217,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 account = currentAccount(), sendMessage = null,
                 tasks = emptyList(), tasksError = null, chatLog = emptyList(),
+                courses = emptyList(), coursesError = null, coursesLoading = false,
                 summary = null, summaryError = null,
                 serverTranscripts = emptyList(),
                 serverTranscriptsLoading = false,
@@ -358,9 +364,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Waseda から取り込んだ時間割をサーバーから取得する。 */
+    fun loadCourses() {
+        if (!accountStore.loggedIn) return
+        _ui.update { it.copy(coursesLoading = true, coursesError = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.fetchCourses(accountStore.baseUrl, accountStore.email, accountStore.token)
+            }
+            result.fold(
+                onSuccess = { list -> _ui.update { it.copy(courses = list, coursesLoading = false) } },
+                onFailure = { e ->
+                    _ui.update {
+                        it.copy(coursesLoading = false, coursesError = e.message ?: "時間割の取得に失敗しました")
+                    }
+                }
+            )
+        }
+    }
+
     /** 課題・予定の完了/未完了を切り替え、成功したら一覧を更新する。 */
     fun toggleTaskDone(task: AiHelperClient.Task) {
-        if (!accountStore.loggedIn) return
+        if (!accountStore.loggedIn || _ui.value.taskActionInProgressId == task.id) return
+        _ui.update { it.copy(taskActionInProgressId = task.id, tasksError = null) }
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
                 AIHelper.setTaskDone(
@@ -369,9 +395,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
             when (result) {
-                is AiHelperClient.Result.Ok -> loadTasks()
+                is AiHelperClient.Result.Ok -> {
+                    _ui.update { it.copy(taskActionInProgressId = null) }
+                    loadTasks()
+                }
                 is AiHelperClient.Result.Error ->
-                    _ui.update { it.copy(tasksError = result.message) }
+                    _ui.update { it.copy(taskActionInProgressId = null, tasksError = result.message) }
+            }
+        }
+    }
+
+    /** 課題・予定を編集し、成功したら一覧とカレンダー表示を更新する。 */
+    fun updateTask(task: AiHelperClient.Task, type: String, content: String, details: String, deadline: String) {
+        if (!accountStore.loggedIn || _ui.value.taskActionInProgressId == task.id) return
+        val trimmed = content.trim()
+        if (trimmed.isEmpty()) {
+            _ui.update { it.copy(tasksError = "内容を入力してください") }
+            return
+        }
+        _ui.update { it.copy(taskActionInProgressId = task.id, tasksError = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.updateTask(
+                    accountStore.baseUrl, accountStore.email, accountStore.token,
+                    task.id, type, trimmed, details.trim(), deadline.trim()
+                )
+            }
+            when (result) {
+                is AiHelperClient.Result.Ok -> {
+                    _ui.update { it.copy(taskActionInProgressId = null) }
+                    loadTasks()
+                }
+                is AiHelperClient.Result.Error ->
+                    _ui.update { it.copy(taskActionInProgressId = null, tasksError = result.message) }
+            }
+        }
+    }
+
+    /** 課題・予定を削除する。 */
+    fun deleteTask(task: AiHelperClient.Task) {
+        if (!accountStore.loggedIn || _ui.value.taskActionInProgressId == task.id) return
+        _ui.update { it.copy(taskActionInProgressId = task.id, tasksError = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.deleteTask(accountStore.baseUrl, accountStore.email, accountStore.token, task.id)
+            }
+            when (result) {
+                is AiHelperClient.Result.Ok -> {
+                    _ui.update { it.copy(taskActionInProgressId = null) }
+                    loadTasks()
+                }
+                is AiHelperClient.Result.Error ->
+                    _ui.update { it.copy(taskActionInProgressId = null, tasksError = result.message) }
             }
         }
     }
@@ -590,7 +665,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _ui.update { it.copy(wasedaSyncMessage = message.ifBlank { "取り込み中…" }) }
                 } else {
                     _ui.update { it.copy(wasedaSyncRunning = false, wasedaSyncMessage = message) }
-                    if (state == "done") loadTasks()
+                    if (state == "done") {
+                        loadTasks()
+                        loadCourses()
+                    }
                     return@launch
                 }
             }

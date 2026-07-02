@@ -211,13 +211,40 @@ const ITEM_SCHEMA = {
   required: ["type", "deadline", "content", "details"],
 };
 
+const CANCELLATION_SCHEMA = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["kadai", "yotei", "any"] },
+    target: { type: "string" },
+    deadline: { type: "string" },
+    details: { type: "string" },
+  },
+  required: ["type", "target", "deadline", "details"],
+};
+
+const UPDATE_SCHEMA = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["kadai", "yotei", "any"] },
+    target: { type: "string" },
+    deadline: { type: "string" },
+    new_type: { type: "string", enum: ["kadai", "yotei", "same"] },
+    new_content: { type: "string" },
+    new_deadline: { type: "string" },
+    new_details: { type: "string" },
+  },
+  required: ["type", "target", "deadline", "new_type", "new_content", "new_deadline", "new_details"],
+};
+
 const ANALYZE_SCHEMA = {
   type: "object",
   properties: {
     tasks: { type: "array", items: ITEM_SCHEMA },
+    cancellations: { type: "array", items: CANCELLATION_SCHEMA },
+    updates: { type: "array", items: UPDATE_SCHEMA },
     summary: { type: "string" },
   },
-  required: ["tasks", "summary"],
+  required: ["tasks", "cancellations", "updates", "summary"],
 };
 
 function buildAnalyzePrompt(content, today) {
@@ -228,14 +255,33 @@ function buildAnalyzePrompt(content, today) {
     "次の文字起こしから以下を抽出してください。",
     "- type='kadai'（課題）: 宿題・タスク・提出物・やるべきこと。",
     "- type='yotei'（予定）: 会議・締切・イベント・約束など日時に紐づくもの。",
+    "- cancellations: 既存の課題/予定を取り消す発話（例『明日の研究会なしで』『やっぱりゼミはキャンセル』『その予定消して』）。",
+    "- updates: 既存の課題/予定を変更する発話（例『明日の研究会15時に変更』『ゼミは明後日に変更ね』『場所は52号館に変更』）。",
     "",
-    "各項目について:",
+    "tasks の各項目について:",
     "- deadline: 期限/日時。YYYY-MM-DD か YYYY-MM-DD HH:MM。不明なら空文字。",
     "- content: 一言でわかる短い要約（例『レポート提出』『研究会議』）。",
     "- details: 担当・条件・場所などの補足。文字起こしにある情報のみ。",
     "",
+    "cancellations の各項目について:",
+    "- type: 予定なら yotei、課題なら kadai、不明なら any。",
+    "- target: 取り消したい対象の短い名前（例『研究会』『ゼミ』『レポート提出』）。",
+    "- deadline: 取り消し対象の日付/日時。YYYY-MM-DD か YYYY-MM-DD HH:MM。不明なら空文字。",
+    "- details: 補足。文字起こしにある情報のみ。",
+    "- 取り消し発話は tasks に入れないでください。",
+    "",
+    "updates の各項目について:",
+    "- type: 予定なら yotei、課題なら kadai、不明なら any。",
+    "- target: 変更したい既存対象の短い名前（例『研究会』『ゼミ』『レポート提出』）。",
+    "- deadline: 変更前の対象を探すための日付/日時。発話に『明日の』などがあれば入れる。不明なら空文字。",
+    "- new_type: 種別を変更するなら kadai/yotei、変更しないなら same。",
+    "- new_content: 名前/内容を変更する場合の新しい名前。変更しないなら空文字。",
+    "- new_deadline: 日時/期限を変更する場合の新しい日付/日時。YYYY-MM-DD か YYYY-MM-DD HH:MM。変更しないなら空文字。",
+    "- new_details: 場所・メモなど詳細を変更する場合の新しい補足。変更しないなら空文字。",
+    "- 変更発話は tasks や cancellations に入れないでください。",
+    "",
     "さらに summary に、この文字起こしの内容を2〜4文で要約してください（何の話題だったか）。",
-    "該当が無ければ tasks は空配列に。文字起こしに無いことは創作しないでください。",
+    "該当が無ければ tasks / cancellations / updates は空配列に。文字起こしに無いことは創作しないでください。",
     "",
     "=== 文字起こし ここから ===",
     content,
@@ -243,7 +289,7 @@ function buildAnalyzePrompt(content, today) {
   ].join("\n");
 }
 
-// 文字起こしを解析して { kadai[], yotei[], tasks[], summary } を返す。
+// 文字起こしを解析して { kadai[], yotei[], tasks[], cancellations[], updates[], summary } を返す。
 // kadai/yotei は後方互換（{deadline,content,details}）、tasks は正規化済み（deadline_at 付き）。
 async function analyze(content, opts = {}) {
   const today = opts.today || localDate();
@@ -265,6 +311,41 @@ async function analyze(content, opts = {}) {
       };
     })
     .filter((t) => t.content);
+  const rawCancellations = Array.isArray(parsed.cancellations) ? parsed.cancellations : [];
+  const cancellations = rawCancellations
+    .map((it) => {
+      const deadlineStr = String(it?.deadline ?? "").trim();
+      const norm = normalizeDeadline(deadlineStr);
+      const type = it?.type === "kadai" || it?.type === "yotei" ? it.type : "any";
+      return {
+        type,
+        target: String(it?.target ?? "").trim(),
+        details: String(it?.details ?? "").trim(),
+        deadline_at: norm.at,
+        date_only: norm.dateOnly,
+      };
+    })
+    .filter((c) => c.target);
+  const rawUpdates = Array.isArray(parsed.updates) ? parsed.updates : [];
+  const updates = rawUpdates
+    .map((it) => {
+      const deadlineNorm = normalizeDeadline(String(it?.deadline ?? "").trim());
+      const newDeadlineNorm = normalizeDeadline(String(it?.new_deadline ?? "").trim());
+      const type = it?.type === "kadai" || it?.type === "yotei" ? it.type : "any";
+      const newType = it?.new_type === "kadai" || it?.new_type === "yotei" ? it.new_type : null;
+      return {
+        type,
+        target: String(it?.target ?? "").trim(),
+        deadline_at: deadlineNorm.at,
+        date_only: deadlineNorm.dateOnly,
+        new_type: newType,
+        new_content: String(it?.new_content ?? "").trim(),
+        new_deadline_at: newDeadlineNorm.at,
+        new_date_only: newDeadlineNorm.dateOnly,
+        new_details: String(it?.new_details ?? "").trim(),
+      };
+    })
+    .filter((u) => u.target && (u.new_type || u.new_content || u.new_deadline_at || u.new_details));
 
   // 後方互換の kadai/yotei（CSV 出力に利用）。
   const toLegacy = (t) => ({
@@ -275,6 +356,8 @@ async function analyze(content, opts = {}) {
 
   return {
     tasks,
+    cancellations,
+    updates,
     kadai: tasks.filter((t) => t.type === "kadai").map(toLegacy),
     yotei: tasks.filter((t) => t.type === "yotei").map(toLegacy),
     summary: String(parsed.summary ?? "").trim(),
@@ -319,7 +402,7 @@ const ASK_SCHEMA = {
       items: {
         type: "object",
         properties: {
-          op: { type: "string", enum: ["add_task", "complete_task", "none"] },
+          op: { type: "string", enum: ["add_task", "complete_task", "delete_task", "update_task", "none"] },
           type: { type: "string", enum: ["kadai", "yotei"] },
           content: { type: "string" },
           details: { type: "string" },
@@ -432,10 +515,13 @@ async function ask(question, ctx = {}) {
     "  actions に op='add_task' を入れる。type は課題=kadai/予定=yotei、content=短い名前、",
     "  deadline=YYYY-MM-DD か YYYY-MM-DD HH:MM（不明なら空）、details=補足。",
     "- 『〇〇終わった/完了にして』なら op='complete_task'、target に対象の番号(#)か内容を入れる。",
+    "- 『〇〇なしで/キャンセル/削除/消して』なら op='delete_task'、target に対象の番号(#)か内容を入れる。",
+    "- 『〇〇を15時に変更』『〇〇は明後日に変更』『場所を△△に変更』なら op='update_task'、",
+    "  target に既存対象、deadline に新しい日時（日時変更時）、content に新しい名前（名前変更時）、details に新しい補足（場所変更時）を入れる。",
     "- 操作が不要なら actions は op='none' 1件のみ、または空配列。",
     "- reply には、依頼を実行したことや結果が利用者に伝わる自然な一言を必ず入れる。",
     "  ※実際の登録はシステム側が actions を見て行うので、reply では『登録しておきました』のように話す。",
-    "- 【重要】actions に入れない限り実際には何も登録されない。登録・完了の依頼には必ず対応する",
+    "- 【重要】actions に入れない限り実際には何も登録・完了・削除・変更されない。操作依頼には必ず対応する",
     "  actions を入れること。逆に actions に入れていないのに reply で『登録した』と言ってはいけない。",
   ].join("\n");
 
@@ -446,7 +532,7 @@ async function ask(question, ctx = {}) {
       const norm = normalizeDeadline(String(a.deadline ?? "").trim());
       return {
         op: a.op,
-        type: a.type === "yotei" ? "yotei" : "kadai",
+        type: a.type === "yotei" ? "yotei" : (a.type === "kadai" ? "kadai" : ""),
         content: String(a.content ?? "").trim(),
         details: String(a.details ?? "").trim(),
         deadline_at: norm.at,

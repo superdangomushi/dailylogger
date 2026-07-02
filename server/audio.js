@@ -113,6 +113,14 @@ async function processJob(job) {
       const result = await gemini.analyze(text);
       await db.saveAnalysis(transcriptId, result.kadai, result.yotei, result.summary);
       await db.upsertTasks(job.email, result.tasks, transcriptId);
+      const updated = await db.applyTaskUpdates(job.email, result.updates);
+      const canceled = await db.cancelTasks(job.email, result.cancellations);
+      if (updated.length) {
+        console.log(`音声ジョブ #${job.id} で予定/課題を ${updated.length} 件変更しました`);
+      }
+      if (canceled.length) {
+        console.log(`音声ジョブ #${job.id} で予定/課題を ${canceled.length} 件削除しました`);
+      }
     } catch (e) {
       console.error(`音声ジョブ #${job.id} の解析に失敗:`, e.message);
     }
