@@ -575,6 +575,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
+            
+            // サーバーにもカレンダー予定を同期する
+            if (all.isNotEmpty()) {
+                withContext(Dispatchers.IO) {
+                    AIHelper.syncCalendar(
+                        prefs.getString("base_url", "") ?: "",
+                        prefs.getString("email", "") ?: "",
+                        prefs.getString("token", "") ?: "",
+                        all
+                    )
+                }
+            }
+            
             _ui.update {
                 it.copy(
                     calendarEvents = all.sortedBy { ev -> ev.startMillis },

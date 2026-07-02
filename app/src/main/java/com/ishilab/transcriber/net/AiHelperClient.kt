@@ -352,6 +352,33 @@ class AiHelperClient {
         return buf.array()
     }
 
+    /** カレンダーの予定をサーバーに同期する。 */
+    fun syncCalendar(
+        baseUrl: String, email: String, token: String,
+        events: List<com.ishilab.transcriber.google.CalendarEvent>
+    ): Result {
+        val url = endpoint(baseUrl, "/api/calendar/sync")
+        val arr = JSONArray().apply {
+            events.forEach { ev ->
+                put(JSONObject()
+                    .put("title", ev.title)
+                    .put("whenText", ev.whenText)
+                    .put("startMillis", ev.startMillis)
+                )
+            }
+        }
+        val body = JSONObject()
+            .put("email", email)
+            .put("token", token)
+            .put("events", arr)
+            .toString()
+        return runCatching {
+            val conn = openPost(url, "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            readResult(conn, onOk = "同期完了")
+        }.getOrElse { Result.Error(it.message ?: "同期に失敗しました") }
+    }
+
     /**
      * 秘書チャット。質問への回答や、「予定入れといて」等の依頼の実行をサーバー（Gemini）に任せる。
      * 成功すると回答文と実行件数を返す。

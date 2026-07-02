@@ -67,6 +67,7 @@ class BackgroundSync(private val context: Context) {
                 if (accountStore.loggedIn) {
                     uploadPending()
                     pollReminders()
+                    syncCalendar()
                 }
                 // 送信対象が残っていなければドレイン完了を通知（未ログインも「これ以上送れない」扱い）。
                 if (!accountStore.loggedIn || pendingCount() == 0) {
@@ -131,6 +132,30 @@ class BackgroundSync(private val context: Context) {
     /** サーバーの未読リマインドをローカル通知として表示し、既読化する。 */
     private fun pollReminders() {
         ReminderNotifier.poll(context)
+    }
+
+    /** 端末の Google カレンダーから予定を読み取り、サーバーへ同期する。 */
+    private fun syncCalendar() {
+        try {
+            val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(context)
+            val emails = googleStore.emails
+            if (emails.isEmpty()) return
+            val all = mutableListOf<com.ishilab.transcriber.google.CalendarEvent>()
+            for (email in emails) {
+                try {
+                    val token = com.ishilab.transcriber.google.GoogleCalendarClient.accessToken(context, email)
+                    val events = com.ishilab.transcriber.google.GoogleCalendarClient.listUpcomingEvents(token).getOrNull()
+                    if (events != null) all += events.map { it.copy(accountEmail = email) }
+                } catch (e: Exception) {
+                    // Ignore auth exceptions in background
+                }
+            }
+            if (all.isNotEmpty()) {
+                client.syncCalendar(accountStore.baseUrl, accountStore.email, accountStore.token, all)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "calendar sync error: ${e.message}")
+        }
     }
 
     private fun ensureChannel() {

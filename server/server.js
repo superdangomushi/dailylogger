@@ -1325,6 +1325,13 @@ function renderDashboard(tableRows) {
     @keyframes fade { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:none; } }
     .login-wrap { max-width:420px; margin:3rem auto; text-align:center; }
     .login-wrap h2 { font-size:1.5rem; }
+    .calendar-grid { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; text-align:center; }
+    .calendar-cell { padding:.6rem 0; border-radius:8px; cursor:pointer; position:relative; }
+    .calendar-cell:hover { background:var(--line); }
+    .calendar-cell.active { background:var(--accent); color:#fff; }
+    .calendar-cell .dot { width:5px; height:5px; background:var(--accent); border-radius:50%; position:absolute; bottom:4px; left:50%; transform:translateX(-50%); }
+    .calendar-cell.active .dot { background:#fff; }
+    .calendar-day-header { font-weight:600; color:var(--muted); font-size:.85rem; padding-bottom:.4rem; }
     hr { border:none; border-top:1px solid var(--line); margin:1.1rem 0; }
   </style>
 </head>
@@ -1364,6 +1371,7 @@ function renderDashboard(tableRows) {
       <nav class="tabs">
         <button class="tab" data-tab="chat" onclick="showTab('chat')">秘書</button>
         <button class="tab" data-tab="tasks" onclick="showTab('tasks')">予定・課題</button>
+        <button class="tab" data-tab="calendar" onclick="showTab('calendar')">カレンダー</button>
         <button class="tab" data-tab="summary" onclick="showTab('summary')">今日の要約</button>
         <button class="tab" data-tab="files" onclick="showTab('files')">ファイル</button>
         <button class="tab" data-tab="account" onclick="showTab('account')">アカウント</button>
@@ -1426,6 +1434,28 @@ function renderDashboard(tableRows) {
           <input id="t_details" placeholder="詳細（任意）" style="margin-top:.5rem">
           <button style="margin-top:.5rem" onclick="addTask()">追加</button>
         </details>
+      </section>
+
+      <section class="card panel" data-panel="calendar">
+        <h2>カレンダー</h2>
+        <div class="row" style="justify-content:space-between; margin-bottom:.8rem">
+          <button class="ghost small" onclick="prevMonth()">‹ 前月</button>
+          <strong id="calMonthTitle" style="font-size:1.1rem"></strong>
+          <button class="ghost small" onclick="nextMonth()">翌月 ›</button>
+        </div>
+        <div class="calendar-grid" id="calendarDayHeaders">
+          <div class="calendar-day-header">日</div><div class="calendar-day-header">月</div><div class="calendar-day-header">火</div>
+          <div class="calendar-day-header">水</div><div class="calendar-day-header">木</div><div class="calendar-day-header">金</div>
+          <div class="calendar-day-header">土</div>
+        </div>
+        <div class="calendar-grid" id="calendarCells" style="margin-bottom:1rem"></div>
+        <hr>
+        <h3 id="calSelectedDateTitle" style="font-size:.95rem; margin:.4rem 0 .6rem">選択した日の予定</h3>
+        <div id="calSelectedEvents" class="muted">日付を選択してください。</div>
+        <div id="calSelectedSummaryBox" class="card" style="display:none; margin-top:.8rem; background:#f8fafc">
+          <h4 style="font-size:.85rem; margin:0 0 .4rem; font-weight:700">この日の要約</h4>
+          <div id="calSelectedSummary" style="font-size:.85rem; line-height:1.5; white-space:pre-wrap"></div>
+        </div>
       </section>
 
       <section class="card panel" data-panel="summary">
@@ -1545,6 +1575,85 @@ function renderDashboard(tableRows) {
     function headers(){ return { 'Content-Type':'application/json',
       'X-Account-Email': auth.email||'', 'Authorization':'Bearer '+(auth.token||'') }; }
 
+    let allGoogleEvents = [];
+    let calYear = new Date().getFullYear();
+    let calMonth = new Date().getMonth() + 1;
+    // sv-SE gives yyyy-mm-dd format natively
+    let calSelectedDate = new Date().toLocaleDateString('sv-SE').slice(0,10);
+    
+    function prevMonth(){ calMonth--; if(calMonth<1){ calMonth=12; calYear--; } renderCalendar(); }
+    function nextMonth(){ calMonth++; if(calMonth>12){ calMonth=1; calYear++; } renderCalendar(); }
+    
+    function renderCalendar(){
+      if(!$('calMonthTitle')) return;
+      $('calMonthTitle').textContent = calYear + '年' + calMonth + '月';
+      const firstDay = new Date(calYear, calMonth - 1, 1).getDay();
+      const lastDate = new Date(calYear, calMonth, 0).getDate();
+      let html = '';
+      for(let i=0; i<firstDay; i++){
+        html += '<div class="calendar-cell muted" style="opacity:.3; cursor:default"></div>';
+      }
+      const pad = (n) => String(n).padStart(2,'0');
+      const dateMap = {};
+      allTasks.forEach(t => {
+        if(t.deadline_at){ dateMap[t.deadline_at.slice(0,10)] = true; }
+      });
+      allGoogleEvents.forEach(ev => {
+        if(ev.startMillis){ dateMap[new Date(ev.startMillis).toLocaleDateString('sv-SE').slice(0,10)] = true; }
+      });
+      for(let d=1; d<=lastDate; d++){
+        const dateStr = calYear + '-' + pad(calMonth) + '-' + pad(d);
+        const isActive = dateStr === calSelectedDate;
+        const hasEvents = dateMap[dateStr];
+        html += '<div class="calendar-cell ' + (isActive ? 'active' : '') + '" onclick="selectCalDate(\\'' + dateStr + '\\')">' + d + (hasEvents ? '<span class="dot"></span>' : '') + '</div>';
+      }
+      $('calendarCells').innerHTML = html;
+      renderSelectedDateEvents();
+    }
+    function selectCalDate(d){ calSelectedDate = d; renderCalendar(); }
+    async function renderSelectedDateEvents(){
+      $('calSelectedDateTitle').textContent = calSelectedDate + ' の予定';
+      const dayItems = [];
+      allTasks.forEach(t => {
+        if(t.deadline_at && t.deadline_at.slice(0,10) === calSelectedDate){
+          const norm = t.deadline_at.replace('T',' ');
+          const time = (!t.date_only && norm.length >= 16) ? norm.substring(11,16) : '終日';
+          const label = t.type === 'yotei' ? '予定' : '課題';
+          dayItems.push({ time, title: '[' + label + '] ' + t.content });
+        }
+      });
+      allGoogleEvents.forEach(ev => {
+        if(ev.startMillis){
+          const dStr = new Date(ev.startMillis).toLocaleDateString('sv-SE').slice(0,10);
+          if(dStr === calSelectedDate){
+            const norm = ev.whenText.replace('T',' ');
+            const time = norm.length >= 16 ? norm.substring(11,16) : '終日';
+            dayItems.push({ time, title: '[カレンダー] ' + ev.title });
+          }
+        }
+      });
+      dayItems.sort((a,b) => (a.time === '終日' ? '00:00' : a.time).localeCompare(b.time === '終日' ? '00:00' : b.time));
+      if(!dayItems.length){
+        $('calSelectedEvents').innerHTML = '<p class="muted">予定はありません。</p>';
+      } else {
+        $('calSelectedEvents').innerHTML = dayItems.map(it => 
+          '<div class="card" style="margin:.3rem 0; padding:.6rem .8rem; display:flex; gap:.8rem; background:#fff; border:1px solid var(--line); border-radius:10px">' +
+          '<strong style="color:var(--accent); min-width:40px">' + it.time + '</strong>' +
+          '<span>' + escapeHtml(it.title) + '</span>' +
+          '</div>'
+        ).join('');
+      }
+      $('calSelectedSummaryBox').style.display = 'none';
+      try {
+        const r = await fetch('/api/summary/' + calSelectedDate, {headers: headers()});
+        const j = await r.json();
+        if(j.ok && j.summary){
+          $('calSelectedSummaryBox').style.display = '';
+          $('calSelectedSummary').textContent = j.summary;
+        }
+      } catch(e){}
+    }
+
     // ---- 認証・画面切替 ----
     let authMode = 'login';
     function showForm(mode){
@@ -1639,11 +1748,8 @@ function renderDashboard(tableRows) {
       } catch(e){}
     }
     async function loadGoogleEvents(){
-      if(!googleAccounts.length){
-        $('googleEvents').innerHTML='';
-        if($('tasksCalendarEvents')) $('tasksCalendarEvents').style.display='none';
-        return;
-      }
+      // Fetch events from server even if no Google accounts are linked,
+      // because the server also merges and returns smartphone local calendar events.
       try {
         const r = await fetch('/api/google/events',{headers:headers()});
         const j = await r.json();
@@ -1652,6 +1758,8 @@ function renderDashboard(tableRows) {
           $('googleEvents').innerHTML = errMsg;
           return;
         }
+        allGoogleEvents = j.events || [];
+        renderCalendar();
         const evs = (j.events||[]).slice(0,8);
         const html = evs.length ? evs.map(ev =>
           '<div>・'+escapeHtml(ev.whenText)+'　'+escapeHtml(ev.title)+
@@ -1929,6 +2037,7 @@ function renderDashboard(tableRows) {
       if(!j.ok){ $('tasks').innerHTML='<p class="muted">'+escapeHtml(j.error||'取得に失敗しました')+'</p>'; return; }
       allTasks = Array.isArray(j.tasks) ? j.tasks : [];
       renderTasks();
+      renderCalendar();
     }
     function clearTaskPeriod(){ $('taskFrom').value=''; $('taskTo').value=''; renderTasks(); }
 
