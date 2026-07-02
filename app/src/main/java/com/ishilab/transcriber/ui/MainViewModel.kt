@@ -11,6 +11,8 @@ import com.ishilab.transcriber.google.CalendarEvent
 import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -99,6 +101,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val accountStore = AccountStore(app)
     private val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(app)
     private val AIHelper = AiHelperClient()
+    private var foregroundSyncJob: Job? = null
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
@@ -129,6 +132,92 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 selectedModel = modelManager.activeModel(),
                 transcripts = items,
             )
+        }
+    }
+
+    /** アプリが前面にいる間だけ、サーバー側で変わる予定・要約などを短い間隔で反映する。 */
+    fun startForegroundSync() {
+        if (foregroundSyncJob?.isActive == true) return
+        foregroundSyncJob = viewModelScope.launch {
+            while (true) {
+                refresh()
+                syncForegroundData()
+                delay(FOREGROUND_SYNC_INTERVAL_MS)
+            }
+        }
+    }
+
+    fun stopForegroundSync() {
+        foregroundSyncJob?.cancel()
+        foregroundSyncJob = null
+    }
+
+    private suspend fun syncForegroundData() {
+        if (!accountStore.loggedIn) return
+        val includeDone = _ui.value.showDoneTasks
+        val baseUrl = accountStore.baseUrl
+        val email = accountStore.email
+        val token = accountStore.token
+
+        withContext(Dispatchers.IO) {
+            runCatching {
+                AIHelper.fetchTasks(baseUrl, email, token, includeDone).getOrThrow()
+            }.onSuccess { list ->
+                _ui.update { it.copy(tasks = list, tasksError = null, showDoneTasks = includeDone) }
+            }
+
+            runCatching {
+                AIHelper.fetchCourses(baseUrl, email, token).getOrThrow()
+            }.onSuccess { list ->
+                _ui.update { it.copy(courses = list, coursesError = null) }
+            }
+
+            if (!_ui.value.summaryLoading) {
+                runCatching {
+                    AIHelper.fetchSummary(baseUrl, email, token).getOrThrow()
+                }.onSuccess { summary ->
+                    _ui.update { it.copy(summary = summary, summaryError = null) }
+                }
+            }
+
+            if (!_ui.value.serverTranscriptsLoading) {
+                runCatching {
+                    AIHelper.fetchServerTranscripts(baseUrl, email, token).getOrThrow()
+                }.onSuccess { list ->
+                    _ui.update { it.copy(serverTranscripts = list, serverTranscriptsError = null) }
+                }
+            }
+
+            runCatching {
+                com.ishilab.transcriber.net.ReminderNotifier.poll(getApplication<Application>())
+            }
+        }
+        syncCalendarSilently()
+    }
+
+    private suspend fun syncCalendarSilently() {
+        val app = getApplication<Application>()
+        val emails = googleStore.emails
+        if (emails.isEmpty()) return
+        val all = mutableListOf<CalendarEvent>()
+        var loadedAnyAccount = false
+        withContext(Dispatchers.IO) {
+            for (email in emails) {
+                try {
+                    val token = GoogleCalendarClient.accessToken(app, email)
+                    val events = GoogleCalendarClient.listUpcomingEvents(token).getOrThrow()
+                    loadedAnyAccount = true
+                    all += events.map { it.copy(accountEmail = email) }
+                } catch (_: Exception) {
+                    // フォアグラウンド同期では利用許可ダイアログやエラー表示を出さず、手動更新に任せる。
+                }
+            }
+            if (loadedAnyAccount && accountStore.loggedIn) {
+                AIHelper.syncCalendar(accountStore.baseUrl, accountStore.email, accountStore.token, all)
+            }
+        }
+        if (loadedAnyAccount) {
+            _ui.update { it.copy(calendarEvents = all.sortedBy { ev -> ev.startMillis }) }
         }
     }
 
@@ -734,11 +823,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val all = mutableListOf<CalendarEvent>()
             var consent: android.content.Intent? = null
             var error: String? = null
+            var loadedAnyAccount = false
             withContext(Dispatchers.IO) {
                 for (email in emails) {
                     try {
                         val token = GoogleCalendarClient.accessToken(app, email)
                         val events = GoogleCalendarClient.listUpcomingEvents(token).getOrThrow()
+                        loadedAnyAccount = true
                         all += events.map { it.copy(accountEmail = email) }
                     } catch (e: com.google.android.gms.auth.UserRecoverableAuthException) {
                         // このアカウントの初回利用許可が必要。同意画面の Intent を UI に渡して起動してもらう。
@@ -751,7 +842,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             
             // サーバーにもカレンダー予定を同期する
-            if (all.isNotEmpty()) {
+            if (loadedAnyAccount) {
                 withContext(Dispatchers.IO) {
                     AIHelper.syncCalendar(
                         accountStore.baseUrl,
@@ -818,4 +909,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         baseUrl = accountStore.baseUrl,
         email = accountStore.email,
     )
+
+    private companion object {
+        const val FOREGROUND_SYNC_INTERVAL_MS = 10_000L
+    }
 }

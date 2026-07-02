@@ -180,10 +180,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        viewModel.refresh()
-        viewModel.loadTasks()
-        viewModel.loadCourses()
+        viewModel.startForegroundSync()
         viewModel.refreshGoogle()
+    }
+
+    override fun onPause() {
+        viewModel.stopForegroundSync()
+        super.onPause()
     }
 
     private fun requestNeededPermissions() {
@@ -257,7 +260,7 @@ private fun MainScreen(
                 when (tab) {
                     0 -> RecordingTab(ui, service, onDownload, onSelectModel, onSetServerTranscribe, onStart, onStop)
                     1 -> RecordsTab(ui, onRefresh, onSend, onLoadServerTranscripts, onLoadServerTranscript)
-                    2 -> CalendarTab(ui, onLoadDaySummary)
+                    2 -> CalendarTab(ui, onUpdateTask, onDeleteTask, onLoadDaySummary)
                     else -> SecretaryTab(
                         ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask,
                         onUpdateTask, onDeleteTask, onSetShowDone, onLoadSummary, onGenerateSummary,
@@ -670,7 +673,12 @@ private fun TranscriptDetail(
     }
 }
 
-private data class CalItem(val date: LocalDate, val time: String, val title: String)
+private data class CalItem(
+    val date: LocalDate,
+    val time: String,
+    val title: String,
+    val task: AiHelperClient.Task? = null,
+)
 
 private val DowJa = listOf("月", "火", "水", "木", "金", "土", "日")
 private val PeriodStartTimes = mapOf(
@@ -708,11 +716,34 @@ private fun courseTime(course: AiHelperClient.Course): String =
 
 /** 月カレンダー。日付をタップするとその日の予定・時間・（あれば）要約を表示。 */
 @Composable
-private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
+private fun CalendarTab(
+    ui: UiState,
+    onUpdateTask: (AiHelperClient.Task, String, String, String, String) -> Unit,
+    onDeleteTask: (AiHelperClient.Task) -> Unit,
+    onLoadDaySummary: (String) -> Unit,
+) {
     var ymStr by rememberSaveable { mutableStateOf(YearMonth.now().toString()) }
     var selectedStr by rememberSaveable { mutableStateOf(LocalDate.now().toString()) }
+    var editingTaskId by rememberSaveable { mutableStateOf<Long?>(null) }
     val ym = runCatching { YearMonth.parse(ymStr) }.getOrDefault(YearMonth.now())
     val selected = runCatching { LocalDate.parse(selectedStr) }.getOrDefault(LocalDate.now())
+    val editingTask = editingTaskId?.let { id -> ui.tasks.firstOrNull { it.id == id } }
+
+    if (editingTask != null) {
+        TaskEditDialog(
+            task = editingTask,
+            saving = ui.taskActionInProgressId == editingTask.id,
+            onDismiss = { editingTaskId = null },
+            onSave = { type, content, details, deadline ->
+                onUpdateTask(editingTask, type, content, details, deadline)
+                editingTaskId = null
+            },
+            onDelete = {
+                onDeleteTask(editingTask)
+                editingTaskId = null
+            },
+        )
+    }
 
     // 課題・予定 + Google カレンダー予定 + Waseda 授業予定を日付ごとにまとめる。
     val byDate = remember(ui.tasks, ui.calendarEvents, ui.courses, ymStr) {
@@ -725,7 +756,7 @@ private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
                     val norm = dl.replace('T', ' ')
                     val time = if (!t.dateOnly && norm.length >= 16) norm.substring(11, 16) else ""
                     val label = if (t.type == "yotei") "予定" else "課題"
-                    list.add(CalItem(d, time, "[$label] ${t.content}"))
+                    list.add(CalItem(d, time, "[$label] ${t.content}", t))
                 }
             }
         }
@@ -837,10 +868,26 @@ private fun CalendarTab(ui: UiState, onLoadDaySummary: (String) -> Unit) {
             item { Text("予定はありません。", style = MaterialTheme.typography.bodySmall) }
         } else {
             items(dayItems) { it2 ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(modifier = Modifier.padding(12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                val task = it2.task
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .then(if (task != null) Modifier.clickable { editingTaskId = task.id } else Modifier)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Text(it2.time.ifBlank { "終日" }, style = MaterialTheme.typography.labelLarge)
-                        Text(it2.title, style = MaterialTheme.typography.bodyMedium)
+                        Text(it2.title, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                        if (task != null) {
+                            TextButton(
+                                onClick = { editingTaskId = task.id },
+                                enabled = ui.taskActionInProgressId != task.id,
+                                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
+                            ) { Text("編集") }
+                        }
                     }
                 }
             }

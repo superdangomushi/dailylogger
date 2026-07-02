@@ -180,16 +180,20 @@ class BackgroundSync(private val context: Context) {
             val emails = googleStore.emails
             if (emails.isEmpty()) return
             val all = mutableListOf<com.ishilab.transcriber.google.CalendarEvent>()
+            var loadedAnyAccount = false
             for (email in emails) {
                 try {
                     val token = com.ishilab.transcriber.google.GoogleCalendarClient.accessToken(context, email)
                     val events = com.ishilab.transcriber.google.GoogleCalendarClient.listUpcomingEvents(token).getOrNull()
-                    if (events != null) all += events.map { it.copy(accountEmail = email) }
+                    if (events != null) {
+                        loadedAnyAccount = true
+                        all += events.map { it.copy(accountEmail = email) }
+                    }
                 } catch (e: Exception) {
                     // Ignore auth exceptions in background
                 }
             }
-            if (all.isNotEmpty()) {
+            if (loadedAnyAccount) {
                 client.syncCalendar(accountStore.baseUrl, accountStore.email, accountStore.token, all)
             }
         } catch (e: Exception) {
