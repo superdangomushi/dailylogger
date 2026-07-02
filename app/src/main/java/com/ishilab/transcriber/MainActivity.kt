@@ -169,6 +169,7 @@ class MainActivity : ComponentActivity() {
                         onSetDefaultGoogle = viewModel::setDefaultGoogle,
                         onLoadCalendar = viewModel::loadCalendar,
                         onAddToCalendar = viewModel::addTaskToCalendar,
+                        onSetSttQuality = viewModel::setSttQuality,
                         onLoadMoodle = viewModel::loadMoodle,
                         onSaveMoodleUrl = viewModel::saveMoodleUrl,
                         onSyncMoodle = viewModel::syncMoodle,
@@ -236,6 +237,7 @@ private fun MainScreen(
     onSetDefaultGoogle: (String) -> Unit,
     onLoadCalendar: () -> Unit,
     onAddToCalendar: (AiHelperClient.Task) -> Unit,
+    onSetSttQuality: (String) -> Unit,
     onLoadMoodle: () -> Unit,
     onSaveMoodleUrl: (String) -> Unit,
     onSyncMoodle: () -> Unit,
@@ -269,6 +271,7 @@ private fun MainScreen(
                         ui, onLogin, onRegister, onLogout, onAsk, onLoadTasks, onToggleTask,
                         onUpdateTask, onDeleteTask, onSetShowDone, onLoadSummary, onGenerateSummary,
                         onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar, onAddToCalendar,
+                        onSetSttQuality,
                         onLoadMoodle, onSaveMoodleUrl, onSyncMoodle, onLoadWaseda, onSaveWaseda, onSyncWaseda
                     )
                 }
@@ -902,6 +905,7 @@ private fun SecretaryTab(
     onSetDefaultGoogle: (String) -> Unit,
     onLoadCalendar: () -> Unit,
     onAddToCalendar: (AiHelperClient.Task) -> Unit,
+    onSetSttQuality: (String) -> Unit,
     onLoadMoodle: () -> Unit,
     onSaveMoodleUrl: (String) -> Unit,
     onSyncMoodle: () -> Unit,
@@ -915,7 +919,7 @@ private fun SecretaryTab(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        item { AiHelperCard(ui, onLogin, onRegister, onLogout) }
+        item { AiHelperCard(ui, onLogin, onRegister, onLogout, onSetSttQuality) }
 
         // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
         item { GoogleCalendarCard(ui, onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar) }
@@ -1645,6 +1649,7 @@ private fun AiHelperCard(
     onLogin: (String, String, String) -> Unit,
     onRegister: (String, String, String) -> Unit,
     onLogout: () -> Unit,
+    onSetSttQuality: (String) -> Unit,
 ) {
     val account = ui.account
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1653,10 +1658,49 @@ private fun AiHelperCard(
             if (account.loggedIn) {
                 Text("ログイン中: ${account.email}")
                 Text(account.baseUrl, style = MaterialTheme.typography.bodySmall)
+                SttQualitySection(ui, onSetSttQuality)
                 TextButton(onClick = onLogout) { Text("ログアウト") }
             } else {
                 AiHelperLoginForm(ui, onLogin, onRegister)
             }
+        }
+    }
+}
+
+// サーバー文字起こしのクオリティ選択肢。値はサーバー API（/api/stt-quality）と共通。
+// 将来はプラン（課金）で選べるものを制限する想定だが、現時点では全員どれでも選べる。
+private val SttQualityOptions = listOf(
+    "light" to "軽量（速い・精度低め）",
+    "standard" to "標準（バランス）",
+    "high" to "最高精度（推奨・現在の既定）",
+)
+
+/** アカウントに紐付く音声認識クオリティの選択。 */
+@Composable
+private fun SttQualitySection(ui: UiState, onSetSttQuality: (String) -> Unit) {
+    Column {
+        Text("音声認識クオリティ", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "サーバーで文字起こしするときの精度と速さの設定です。",
+            style = MaterialTheme.typography.bodySmall
+        )
+        SttQualityOptions.forEach { (value, label) ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !ui.sttQualityBusy) { onSetSttQuality(value) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                RadioButton(
+                    selected = ui.sttQuality == value,
+                    onClick = { onSetSttQuality(value) },
+                    enabled = !ui.sttQualityBusy,
+                )
+                Text(label, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        ui.sttQualityMessage?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

@@ -25,8 +25,17 @@ function sttPython() {
   return fs.existsSync(venv) ? venv : null;
 }
 
+// アカウントの音声認識クオリティ → transcribe.py への環境変数上書き。
+// high は従来どおりの自動判定（GPU なら large-v3 の精度最優先）。
+// 将来プラン（課金）でクオリティを制限する場合もここは変えず、選択側で制限する。
+const QUALITY_ENV = {
+  light: { WHISPER_MODEL: "small", WHISPER_BEAM_SIZE: "5", WHISPER_BEST_OF: "5", WHISPER_PATIENCE: "1.0" },
+  standard: { WHISPER_MODEL: "large-v3-turbo" },
+  high: {},
+};
+
 // stt/transcribe.py を子プロセスで実行し、stdout の本文を返す。
-function localTranscribe(filePath) {
+function localTranscribe(filePath, quality) {
   return new Promise((resolve, reject) => {
     const py = sttPython();
     if (!py) {
@@ -34,7 +43,8 @@ function localTranscribe(filePath) {
         "ローカル文字起こしが未設定です（サーバーで `make stt-deps` を実行してください）"
       ));
     }
-    const child = spawn(py, [path.join(STT_DIR, "transcribe.py"), filePath], { env: process.env });
+    const env = { ...process.env, ...(QUALITY_ENV[quality] || {}) };
+    const child = spawn(py, [path.join(STT_DIR, "transcribe.py"), filePath], { env });
     let out = "";
     let err = "";
     child.stdout.on("data", (c) => { out += c.toString(); });
@@ -94,7 +104,9 @@ async function processJob(job) {
   try {
     if (!fs.existsSync(job.stored_path)) throw new Error("音声ファイルが見つかりません");
 
-    const text = await localTranscribe(job.stored_path);
+    // アップロードしたユーザーのクオリティ設定で文字起こしする（取得失敗時は既定の high）。
+    const quality = await db.getSttQuality(job.email).catch(() => "high");
+    const text = await localTranscribe(job.stored_path, quality);
     if (!text.trim()) {
       // 無音などで本文なし。エラーではなく完了扱いにする。
       await db.finishAudioJob(job.id, { status: "done" });

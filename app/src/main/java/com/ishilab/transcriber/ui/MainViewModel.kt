@@ -90,6 +90,10 @@ data class UiState(
     val daySummary: String? = null,
     /** true なら録音音声をサーバーへアップロードして文字起こしする（端末 Whisper を使わない）。 */
     val serverTranscribe: Boolean = false,
+    // サーバー文字起こしのクオリティ（"light"/"standard"/"high"）。アカウントに紐付く。
+    val sttQuality: String = "high",
+    val sttQualityBusy: Boolean = false,
+    val sttQualityMessage: String? = null,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
     val googleConnected: Boolean get() = googleEmails.isNotEmpty()
@@ -116,6 +120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             loadSummary()
             loadServerTranscripts()
             loadChatHistory()
+            loadSttQuality()
         }
     }
 
@@ -289,6 +294,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     loadServerTranscripts()
                     loadChatHistory()
                     loadMoodle()
+                    loadSttQuality()
                     refreshGoogle()
                 },
                 onFailure = { e ->
@@ -308,6 +314,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 tasks = emptyList(), tasksError = null, chatLog = emptyList(),
                 courses = emptyList(), coursesError = null, coursesLoading = false,
                 summary = null, summaryError = null,
+                sttQuality = "high", sttQualityMessage = null,
                 serverTranscripts = emptyList(),
                 serverTranscriptsLoading = false,
                 serverTranscriptsError = null,
@@ -762,6 +769,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
             _ui.update { it.copy(wasedaSyncRunning = false, wasedaSyncMessage = "取り込みの完了を確認できませんでした") }
+        }
+    }
+
+    /** サーバー文字起こしのクオリティ設定を取得。 */
+    fun loadSttQuality() {
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            val r = withContext(Dispatchers.IO) {
+                AIHelper.fetchSttQuality(accountStore.baseUrl, accountStore.email, accountStore.token)
+            }
+            r.onSuccess { q -> _ui.update { it.copy(sttQuality = q) } }
+        }
+    }
+
+    /**
+     * サーバー文字起こしのクオリティを変更して保存する。
+     * 将来はプラン（課金）で選べるクオリティを制限する想定。現時点では制限なし。
+     */
+    fun setSttQuality(quality: String) {
+        if (!accountStore.loggedIn || _ui.value.sttQualityBusy) return
+        val prev = _ui.value.sttQuality
+        _ui.update { it.copy(sttQuality = quality, sttQualityBusy = true, sttQualityMessage = null) }
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.saveSttQuality(accountStore.baseUrl, accountStore.email, accountStore.token, quality)
+            }
+            _ui.update {
+                when (result) {
+                    is AiHelperClient.Result.Ok ->
+                        it.copy(sttQualityBusy = false, sttQualityMessage = "保存しました")
+                    is AiHelperClient.Result.Error ->
+                        it.copy(sttQualityBusy = false, sttQuality = prev, sttQualityMessage = result.message)
+                }
+            }
         }
     }
 

@@ -165,6 +165,8 @@ async function ensureSchema() {
 
   // Moodle カレンダーの iCal 書き出し URL（ユーザーごと）。
   await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
+  // 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
+  await addColumnIfMissing("users", "stt_quality", "VARCHAR(16) NOT NULL DEFAULT 'high'");
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
   await addColumnIfMissing("users", "google_email", "VARCHAR(255) NULL");
   // Web(OAuth) で連携した Google アカウント（1ユーザーに複数可）。
@@ -784,6 +786,18 @@ async function userExists(email) {
   return rows.length > 0;
 }
 
+// 音声認識クオリティ。行がない（accounts.json 由来のアカウント等）場合は既定の 'high'。
+async function setSttQuality(email, quality) {
+  await pool.query(`UPDATE users SET stt_quality = ? WHERE email = ?`, [quality, email]);
+}
+
+async function getSttQuality(email) {
+  const [rows] = await pool.query(
+    `SELECT stt_quality FROM users WHERE email = ? LIMIT 1`, [email]
+  );
+  return (rows[0] && rows[0].stt_quality) || "high";
+}
+
 async function setMoodleUrl(email, url) {
   await pool.query(`UPDATE users SET moodle_ical_url = ? WHERE email = ?`, [url || null, email]);
 }
@@ -992,6 +1006,8 @@ module.exports = {
   userExists,
   setMoodleUrl,
   getMoodleUrl,
+  setSttQuality,
+  getSttQuality,
   listUsersWithMoodle,
   setWasedaCreds,
   getWasedaCreds,

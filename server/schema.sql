@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS users (
   -- Waseda アカウント（時間割スクレイパ用）。パスワードは AES-256-GCM 暗号化（iv:tag:cipher の hex）。
   waseda_user   VARCHAR(255) NULL,
   waseda_password_enc VARCHAR(1024) NULL,
+  -- 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
+  stt_quality   VARCHAR(16)  NOT NULL DEFAULT 'high',
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_token (token)

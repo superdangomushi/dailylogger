@@ -345,6 +345,32 @@ class AiHelperClient {
         }.getOrElse { Result.Error(it.message ?: "保存に失敗しました") }
     }
 
+    /** 音声認識クオリティ（"light"/"standard"/"high"）を取得する。 */
+    fun fetchSttQuality(baseUrl: String, email: String, token: String): kotlin.Result<String> {
+        val url = endpoint(baseUrl, "/api/stt-quality?email=${enc(email)}&token=${enc(token)}")
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 15_000; readTimeout = 20_000
+                setRequestProperty("Accept", "application/json")
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) json.optString("quality").ifBlank { "high" }
+            else throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+        }
+    }
+
+    /** 音声認識クオリティを保存する。 */
+    fun saveSttQuality(baseUrl: String, email: String, token: String, quality: String): Result {
+        val url = endpoint(baseUrl, "/api/stt-quality")
+        val body = JSONObject().put("email", email).put("token", token).put("quality", quality).toString()
+        return runCatching {
+            val conn = openPost(url, "application/json")
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            readResult(conn, onOk = "保存しました")
+        }.getOrElse { Result.Error(it.message ?: "保存に失敗しました") }
+    }
+
     /** Moodle をいま同期し、取り込んだ件数を返す。 */
     fun syncMoodle(baseUrl: String, email: String, token: String): kotlin.Result<Int> {
         val url = endpoint(baseUrl, "/api/moodle/sync")

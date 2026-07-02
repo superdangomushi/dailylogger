@@ -603,6 +603,36 @@ app.get("/api/moodle", async (req, res) => {
   }
 });
 
+// 音声認識クオリティの取得・変更。
+// 将来はプラン（課金）で選択肢を制限する想定だが、現時点では課金要素はなく全員が自由に選べる。
+const STT_QUALITIES = ["light", "standard", "high"];
+
+app.get("/api/stt-quality", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const quality = await db.getSttQuality(account.email);
+    res.json({ ok: true, quality, choices: STT_QUALITIES });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post("/api/stt-quality", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const quality = String(req.body?.quality || "").trim();
+  if (!STT_QUALITIES.includes(quality)) {
+    return res.status(400).json({ ok: false, error: "quality は light/standard/high のいずれかを指定してください" });
+  }
+  try {
+    await db.setSttQuality(account.email, quality);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/moodle", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
