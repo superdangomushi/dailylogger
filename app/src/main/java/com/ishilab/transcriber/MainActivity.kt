@@ -84,6 +84,7 @@ import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.net.AiHelperClient
 import com.ishilab.transcriber.service.AudioCaptureService
 import com.ishilab.transcriber.service.ServiceState
+import com.ishilab.transcriber.ui.ChatMessage
 import com.ishilab.transcriber.ui.MainViewModel
 import com.ishilab.transcriber.ui.TranscriptItem
 import com.ishilab.transcriber.ui.UiState
