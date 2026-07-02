@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS users (
   KEY idx_users_token (token)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
+-- Web(OAuth) で連携した Google アカウント（1ユーザーに複数可）。
+-- refresh_token は AES-256-GCM で暗号化した文字列（iv:tag:cipher の hex）。
+CREATE TABLE IF NOT EXISTS google_accounts (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  email         VARCHAR(255) NOT NULL,
+  google_email  VARCHAR(255) NOT NULL,
+  refresh_token TEXT         NOT NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_user_google (email, google_email)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
 -- 履修時間割（科目登録から取得）。曜日×時限×科目名×教室。
 CREATE TABLE IF NOT EXISTS courses (
   id         INT AUTO_INCREMENT PRIMARY KEY,

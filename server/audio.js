@@ -2,15 +2,53 @@
 //
 // 端末は音声(WAV等)を POST /api/audio へアップロードするだけで、重い処理はサーバーが行う:
 //   1. アップロードを uploads/audio/ に保存し、audio_jobs に queued で登録
-//   2. ワーカーが順番に Gemini で文字起こし
+//   2. ワーカーが順番にローカルの Whisper (faster-whisper) で文字起こし
+//      （Gemini はトークン消費が大きいため文字起こしには使わない。導入は `make stt-deps`）
 //   3. 文字起こし結果は従来のテキストアップロードと同じ流れ
-//      （transcripts 保存 → 課題/予定の抽出 → tasks 登録）に乗せる
+//      （transcripts 保存 → 課題/予定の抽出(Gemini) → tasks 登録）に乗せる
 //   4. 進行状況は audio_jobs.status（queued/processing/done/error）で確認できる
 
 const fs = require("fs");
 const path = require("path");
+const { spawn } = require("child_process");
 const db = require("./db");
 const gemini = require("./gemini");
+
+const STT_DIR = path.join(__dirname, "stt");
+
+// ローカル文字起こしに使う python。WHISPER_PYTHON で上書きでき、
+// 既定は stt/.venv（make stt-deps が作る）の python。
+function sttPython() {
+  if (process.env.WHISPER_PYTHON) return process.env.WHISPER_PYTHON;
+  const venv = path.join(STT_DIR, ".venv", "bin", "python3");
+  return fs.existsSync(venv) ? venv : null;
+}
+
+// stt/transcribe.py を子プロセスで実行し、stdout の本文を返す。
+function localTranscribe(filePath) {
+  return new Promise((resolve, reject) => {
+    const py = sttPython();
+    if (!py) {
+      return reject(new Error(
+        "ローカル文字起こしが未設定です（サーバーで `make stt-deps` を実行してください）"
+      ));
+    }
+    const child = spawn(py, [path.join(STT_DIR, "transcribe.py"), filePath], { env: process.env });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (c) => { out += c.toString(); });
+    child.stderr.on("data", (c) => { err = (err + c.toString()).slice(-2000); });
+    child.on("error", (e) => reject(new Error(`文字起こしを起動できません: ${e.message}`)));
+    // 長時間録音対策のタイムアウト（2時間）。
+    const timer = setTimeout(() => child.kill("SIGKILL"), 2 * 3600_000);
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve(out.trim());
+      const tail = err.trim().split("\n").filter(Boolean).slice(-2).join(" / ");
+      reject(new Error(`文字起こし失敗 (exit ${code})${tail ? `: ${tail}` : ""}`));
+    });
+  });
+}
 
 const AUDIO_DIR = path.join(__dirname, "uploads", "audio");
 
@@ -53,11 +91,9 @@ async function processQueue() {
 async function processJob(job) {
   console.log(`音声文字起こし開始: #${job.id} ${job.email} ${job.filename}`);
   try {
-    if (!gemini.isConfigured()) throw new Error("Gemini が未設定です（GEMINI_API_KEY）");
     if (!fs.existsSync(job.stored_path)) throw new Error("音声ファイルが見つかりません");
 
-    const mime = job.mime || "audio/wav";
-    const text = await gemini.transcribeAudio(job.stored_path, mime, job.filename);
+    const text = await localTranscribe(job.stored_path);
     if (!text.trim()) {
       // 無音などで本文なし。エラーではなく完了扱いにする。
       await db.finishAudioJob(job.id, { status: "done" });

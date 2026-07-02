@@ -155,6 +155,19 @@ async function ensureSchema() {
   await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
   await addColumnIfMissing("users", "google_email", "VARCHAR(255) NULL");
+  // Web(OAuth) で連携した Google アカウント（1ユーザーに複数可）。
+  // refresh_token は AES-256-GCM で暗号化した文字列を保存する（暗号化は呼び出し側）。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS google_accounts (
+      id            INT AUTO_INCREMENT PRIMARY KEY,
+      email         VARCHAR(255) NOT NULL,
+      google_email  VARCHAR(255) NOT NULL,
+      refresh_token TEXT         NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_user_google (email, google_email)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
   // Waseda アカウント（時間割スクレイパ用）。パスワードは AES-256-GCM で暗号化して保存。
   await addColumnIfMissing("users", "waseda_user", "VARCHAR(255) NULL");
   await addColumnIfMissing("users", "waseda_password_enc", "VARCHAR(1024) NULL");
@@ -657,6 +670,31 @@ async function setGoogleEmail(email, googleEmail) {
   await pool.query(`UPDATE users SET google_email = ? WHERE email = ?`, [googleEmail || null, email]);
 }
 
+// ---- Web(OAuth) で連携した Google アカウント（複数可） ----
+
+async function upsertGoogleAccount(email, googleEmail, refreshTokenEnc) {
+  await pool.query(
+    `INSERT INTO google_accounts (email, google_email, refresh_token) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE refresh_token = VALUES(refresh_token)`,
+    [email, googleEmail, refreshTokenEnc]
+  );
+}
+
+async function listGoogleAccounts(email) {
+  const [rows] = await pool.query(
+    `SELECT google_email, refresh_token FROM google_accounts WHERE email = ? ORDER BY id`,
+    [email]
+  );
+  return rows;
+}
+
+async function removeGoogleAccount(email, googleEmail) {
+  await pool.query(
+    `DELETE FROM google_accounts WHERE email = ? AND google_email = ?`,
+    [email, googleEmail]
+  );
+}
+
 // Moodle URL を登録済みのユーザー一覧（定期同期用）。
 async function listUsersWithMoodle() {
   const [rows] = await pool.query(
@@ -680,6 +718,9 @@ module.exports = {
   setWasedaCreds,
   getWasedaCreds,
   setGoogleEmail,
+  upsertGoogleAccount,
+  listGoogleAccounts,
+  removeGoogleAccount,
   replaceCourses,
   listCourses,
   saveDocument,

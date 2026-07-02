@@ -59,6 +59,15 @@ npm start          # http://localhost:3000
 | `LINE_CHANNEL_ACCESS_TOKEN` | （空） | LINE Messaging API のチャネルアクセストークン。未設定なら LINE 送信はスキップ |
 | `REMINDER_INTERVAL_SEC` | `60` | 締切チェックの間隔（秒） |
 | `DAILY_SUMMARY_INTERVAL_MIN` | `60` | 「今日の要約」自動再生成の間隔（分）。`0` で無効 |
+| `GOOGLE_CLIENT_ID` | （空） | Web からの Google カレンダー連携用 OAuth クライアント ID |
+| `GOOGLE_CLIENT_SECRET` | （空） | 同シークレット。両方未設定なら Web の Google 連携は無効 |
+| `GOOGLE_REDIRECT_URL` | リクエストから自動 | OAuth リダイレクト URI を固定したい場合に指定 |
+| `WHISPER_MODEL` | `large-v3-turbo` | ローカル文字起こし (faster-whisper) のモデル名 |
+| `WHISPER_COMPUTE` | `int8` | faster-whisper の compute_type（CPU なら int8 推奨） |
+
+Web の Google 連携を有効にするには、Google Cloud Console で「OAuth クライアント ID（ウェブアプリケーション）」を作成し、
+承認済みリダイレクト URI に `https://<ドメイン>/api/google/callback` を登録して、上記 2 変数を `.env` などで渡す。
+（Android アプリの連携は端末内のアカウントを使うため、この設定は不要。）
 
 ```bash
 # フル機能で起動する例

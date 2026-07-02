@@ -38,7 +38,7 @@ MYSQL_ADMIN ?= sudo mysql --defaults-file=/etc/mysql/debian.cnf
 MYSQL_APP := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) -p$(DB_PASSWORD)
 
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps db db-user db-schema npm-deps python-deps run clean
+.PHONY: help install system-deps db db-user db-schema npm-deps python-deps stt-deps run clean
 
 help: ## 使い方を表示
 	@echo "aihelper サーバー Makefile"
@@ -49,10 +49,11 @@ help: ## 使い方を表示
 	@echo "  make db            DB($(DB_NAME))・ユーザー($(DB_USER))作成 + schema 適用 (要 sudo)"
 	@echo "  make npm-deps      npm 依存関係のみインストール"
 	@echo "  make python-deps   時間割スクレイパの Python 依存を scraper/.venv に導入 (要 sudo)"
+	@echo "  make stt-deps      ローカル文字起こし (faster-whisper) を stt/.venv に導入 (要 sudo)"
 	@echo "  make clean         node_modules を削除"
 
 # ワンショット・セットアップ。前提ターゲットは記載順に実行される。
-install: system-deps db npm-deps python-deps ## これ1つでサーバーを動かせる状態にする
+install: system-deps db npm-deps python-deps stt-deps ## これ1つでサーバーを動かせる状態にする
 	@echo ""
 	@echo "✅ セットアップ完了。'make run' で起動できます。"
 	@echo "   DB: $(DB_USER)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
@@ -101,6 +102,14 @@ python-deps: ## 時間割スクレイパの Python 依存 (bs4/selenium 等) を
 	scraper/.venv/bin/pip install -r scraper/requirements.txt
 	@echo ">> selenium 用の Chromium ブラウザと chromedriver を導入します"
 	sudo apt-get install -y chromium-browser chromium-chromedriver
+
+# 文字起こしは Gemini でなくローカルの Whisper で行う（トークン節約）。
+# 初回実行時にモデル（既定 large-v3-turbo 約1.6GB）を自動ダウンロードする。
+stt-deps: ## ローカル文字起こし (faster-whisper) を stt/.venv に導入 (要 sudo)
+	@echo ">> stt/.venv に faster-whisper を導入します"
+	sudo apt-get install -y python3-venv ffmpeg
+	python3 -m venv stt/.venv
+	stt/.venv/bin/pip install -r stt/requirements.txt
 
 run: ## サーバーを起動 (DB 認証情報は上の変数から環境変数で渡る)
 	npm start

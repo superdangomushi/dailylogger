@@ -41,6 +41,7 @@ const summary = require("./summary");
 const reminders = require("./reminders");
 const moodle = require("./moodle");
 const audio = require("./audio");
+const google = require("./google");
 
 const PORT = process.env.PORT || 3000;
 const ACCOUNTS_FILE = path.join(__dirname, "accounts.json");
@@ -306,6 +307,121 @@ app.post("/api/google-link", async (req, res) => {
   try {
     await db.setGoogleEmail(account.email, googleEmail);
     res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ---- Google 連携（Web OAuth: PC ブラウザから複数アカウントを連携） ----
+
+// OAuth の state → どのユーザーの連携要求か（CSRF 対策。10分で失効）。
+const googleOAuthStates = new Map();
+
+function googleRedirectUri(req) {
+  if (process.env.GOOGLE_REDIRECT_URL) return process.env.GOOGLE_REDIRECT_URL;
+  const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  return `${proto}://${req.get("host")}/api/google/callback`;
+}
+
+// 同意画面の URL を返す。ブラウザ側はこの URL へ遷移する。
+app.get("/api/google/auth-url", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  if (!google.isConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "Google 連携が未設定です（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）",
+    });
+  }
+  const state = crypto.randomBytes(24).toString("hex");
+  const redirectUri = googleRedirectUri(req);
+  googleOAuthStates.set(state, { email: account.email, redirectUri, expires: Date.now() + 10 * 60_000 });
+  // 溜まった期限切れ state を掃除。
+  for (const [k, v] of googleOAuthStates) if (v.expires < Date.now()) googleOAuthStates.delete(k);
+  res.json({ ok: true, url: google.authUrl(redirectUri, state) });
+});
+
+// Google からのリダイレクト先。code を refresh_token に交換して保存し、画面へ戻す。
+app.get("/api/google/callback", async (req, res) => {
+  const back = (q) => res.redirect(`/?google=${q}#account`);
+  try {
+    const pending = googleOAuthStates.get(String(req.query.state || ""));
+    if (!pending || pending.expires < Date.now()) return back("expired");
+    googleOAuthStates.delete(String(req.query.state));
+    if (!req.query.code) return back("denied");
+    const { googleEmail, refreshToken } = await google.exchangeCode(String(req.query.code), pending.redirectUri);
+    if (!refreshToken) return back("error");
+    await db.upsertGoogleAccount(pending.email, googleEmail, encryptCred(refreshToken));
+    console.log(`Google 連携(Web): ${pending.email} <- ${googleEmail}`);
+    back("linked");
+  } catch (e) {
+    console.error("Google 連携(Web)に失敗:", e.message);
+    back("error");
+  }
+});
+
+// 連携中の Google アカウント一覧。
+app.get("/api/google/accounts", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const rows = await db.listGoogleAccounts(account.email);
+    res.json({ ok: true, configured: google.isConfigured(), accounts: rows.map((r) => r.google_email) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 指定した Google アカウントの連携を解除。
+app.post("/api/google/unlink", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    await db.removeGoogleAccount(account.email, String(req.body?.googleEmail || ""));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 連携中の全アカウントから直近の予定を取得して開始時刻順に返す。
+app.get("/api/google/events", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const rows = await db.listGoogleAccounts(account.email);
+    const events = [];
+    const errors = [];
+    for (const r of rows) {
+      try {
+        const token = await google.accessTokenOf(decryptCred(r.refresh_token));
+        const list = await google.listUpcomingEvents(token);
+        events.push(...list.map((ev) => ({ ...ev, accountEmail: r.google_email })));
+      } catch (e) {
+        errors.push(`${r.google_email}: ${e.message}`);
+      }
+    }
+    events.sort((a, b) => a.startMillis - b.startMillis);
+    res.json({ ok: true, events, error: errors.join(" / ") || undefined });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 課題・予定の締切を指定アカウントの Google カレンダーに登録する。
+app.post("/api/google/add-event", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const googleEmail = String(req.body?.googleEmail || "").trim();
+  const content = String(req.body?.content || "").trim();
+  if (!content) return res.status(400).json({ ok: false, error: "内容が空です" });
+  try {
+    const rows = await db.listGoogleAccounts(account.email);
+    const row = rows.find((r) => r.google_email === googleEmail) || rows[0];
+    if (!row) return res.status(400).json({ ok: false, error: "Google アカウントが未連携です" });
+    const token = await google.accessTokenOf(decryptCred(row.refresh_token));
+    await google.insertDeadline(token, content, String(req.body?.deadline || ""), Boolean(req.body?.dateOnly));
+    res.json({ ok: true, googleEmail: row.google_email });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1215,6 +1331,18 @@ function renderDashboard(tableRows) {
         </div>
         <style>@keyframes slide { from { margin-left:0 } to { margin-left:70% } }</style>
         <hr>
+        <h3 style="font-size:.95rem; margin:.2rem 0 .6rem">Google カレンダー連携</h3>
+        <p class="muted" style="margin:.2rem 0 .5rem">
+          Google アカウントを連携すると、課題・予定の締切を Google カレンダーに登録したり、
+          直近の予定を表示できます。複数アカウントを連携できます。
+        </p>
+        <div id="googleAccounts"><p class="muted">未連携です。</p></div>
+        <div class="row" style="margin-top:.6rem">
+          <button onclick="connectGoogle()">Google アカウントを連携</button>
+          <span id="googleState" class="muted"></span>
+        </div>
+        <div id="googleEvents" style="margin-top:.6rem"></div>
+        <hr>
         <button class="ghost" onclick="logout()">ログアウト</button>
       </section>
     </div><!-- /#app -->
@@ -1267,6 +1395,16 @@ function renderDashboard(tableRows) {
       $('accEmail').textContent = auth.email || '';
       showTab('chat');
       loadAll();
+      // Google OAuth から戻ってきた直後は、アカウントタブを開いて結果を表示する。
+      const gq = new URLSearchParams(location.search).get('google');
+      if(gq){
+        history.replaceState(null, '', location.pathname);
+        showTab('account');
+        $('googleState').textContent =
+          gq==='linked' ? '✓ Google アカウントを連携しました' :
+          gq==='denied' ? '✗ 連携がキャンセルされました' :
+          gq==='expired' ? '✗ 時間切れです。もう一度お試しください' : '✗ 連携に失敗しました';
+      }
     }
     function logout(){
       auth = {}; localStorage.removeItem('mb_auth');
@@ -1282,7 +1420,82 @@ function renderDashboard(tableRows) {
       if(j.ok){ $('pwState').textContent='✓ 変更しました'; $('curpw').value=$('newpw').value=''; }
       else $('pwState').textContent = '✗ ' + (j.error||'変更失敗');
     }
-    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioJobs(); }
+    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioJobs(); loadGoogle(); }
+
+    // ---- Google カレンダー連携（Web OAuth） ----
+    let googleAccounts = [];
+    function googleDefault(){
+      const d = localStorage.getItem('mb_gdefault');
+      return googleAccounts.includes(d) ? d : (googleAccounts[0]||'');
+    }
+    function setGoogleDefault(e){ localStorage.setItem('mb_gdefault', e); renderGoogleAccounts(); }
+    function renderGoogleAccounts(){
+      if(!googleAccounts.length){
+        $('googleAccounts').innerHTML = '<p class="muted">未連携です。</p>';
+      } else {
+        const def = googleDefault();
+        $('googleAccounts').innerHTML = googleAccounts.map(e =>
+          '<div class="row" style="margin:.2rem 0; gap:.4rem">'+
+          '<label style="flex:1"><input type="radio" name="gdef" '+(e===def?'checked':'')+
+          ' onchange="setGoogleDefault(\''+escapeHtml(e)+'\')"> '+escapeHtml(e)+'</label>'+
+          '<button class="ghost small" onclick="unlinkGoogle(\''+escapeHtml(e)+'\')">解除</button></div>').join('') +
+          (googleAccounts.length>1 ? '<p class="muted" style="margin:.2rem 0">選択中のアカウントが「カレンダー登録」の登録先になります。</p>' : '');
+      }
+      renderTasks(); // 連携状態でタスク行の「カレンダー登録」ボタン表示が変わる
+    }
+    async function loadGoogle(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/google/accounts',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok){ $('googleState').textContent = '✗ ' + (j.error||'取得失敗'); return; }
+        googleAccounts = j.accounts || [];
+        if(!j.configured && !googleAccounts.length){
+          $('googleState').textContent = 'サーバー側の設定（GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET）が必要です';
+        }
+        renderGoogleAccounts();
+        loadGoogleEvents();
+      } catch(e){}
+    }
+    async function loadGoogleEvents(){
+      if(!googleAccounts.length){ $('googleEvents').innerHTML=''; return; }
+      try {
+        const r = await fetch('/api/google/events',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok){ $('googleEvents').innerHTML = '<p class="muted">'+escapeHtml(j.error||'予定取得失敗')+'</p>'; return; }
+        const evs = (j.events||[]).slice(0,8);
+        $('googleEvents').innerHTML =
+          '<p class="muted" style="margin:.4rem 0 .2rem">直近の予定</p>' +
+          (evs.length ? evs.map(ev =>
+            '<div>・'+escapeHtml(ev.whenText)+'　'+escapeHtml(ev.title)+
+            (googleAccounts.length>1 ? ' <span class="muted">('+escapeHtml((ev.accountEmail||'').split('@')[0])+')</span>' : '')+
+            '</div>').join('')
+          : '<p class="muted">直近の予定はありません。</p>') +
+          (j.error ? '<p class="muted">'+escapeHtml(j.error)+'</p>' : '');
+      } catch(e){}
+    }
+    async function connectGoogle(){
+      $('googleState').textContent = '';
+      const r = await fetch('/api/google/auth-url',{headers:headers()});
+      const j = await r.json();
+      if(!j.ok){ $('googleState').textContent = '✗ ' + (j.error||'連携を開始できません'); return; }
+      location.href = j.url; // Google の同意画面へ（戻り先は /?google=linked）
+    }
+    async function unlinkGoogle(email){
+      await fetch('/api/google/unlink',{method:'POST',headers:headers(),
+        body:JSON.stringify({googleEmail:email})});
+      $('googleState').textContent = email + ' の連携を解除しました';
+      loadGoogle();
+    }
+    async function addToCalendar(id){
+      const t = allTasks.find(x=>x.id===id); if(!t) return;
+      const r = await fetch('/api/google/add-event',{method:'POST',headers:headers(),
+        body:JSON.stringify({googleEmail:googleDefault(), content:t.content,
+          deadline:t.deadline_at, dateOnly:!!t.date_only})});
+      const j = await r.json();
+      if(j.ok){ $('googleState').textContent = '✓ 「'+t.content+'」を '+j.googleEmail+' に登録しました'; loadGoogleEvents(); }
+      else alert('カレンダー登録失敗: ' + (j.error||''));
+    }
 
     // ---- 音声ジョブ状況 ----
     const AUDIO_STATUS = { queued:'待機中', processing:'処理中', done:'完了', error:'失敗' };
@@ -1537,7 +1750,10 @@ function renderDashboard(tableRows) {
           '<td class="col-due due '+dueClass(t.deadline_at)+'">'+dueHtml+'</td>'+
           '<td class="col-mid"><input type="checkbox" '+(done?'checked':'')+
             ' onchange="toggle('+t.id+',this.checked)"></td>'+
-          '<td class="col-mid"><button class="ghost small" onclick="delTask('+t.id+')">削除</button></td>'+
+          '<td class="col-mid"><button class="ghost small" onclick="delTask('+t.id+')">削除</button>'+
+            (googleAccounts.length && t.deadline_at ?
+              '<button class="ghost small" title="Google カレンダーに登録" onclick="addToCalendar('+t.id+')">📅</button>' : '')+
+          '</td>'+
         '</tr>';
       }).join('');
       $('tasks').innerHTML =
