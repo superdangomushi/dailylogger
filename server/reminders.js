@@ -4,7 +4,7 @@
 //   送信済みフラグ（notified_1d / notified_1h）で二重送信を防ぐ（冪等）。
 // - 送った通知は notifications テーブルにも記録し、端末アプリがローカル通知として
 //   取得できるようにする（LINE 未設定でもアプリ側の通知は機能する）。
-// - あわせて1日1回程度、その日の文字起こしから「今日の要約」を生成して保存する。
+// - あわせて一定間隔で、その日の文字起こしから「今日の要約」を生成して保存する。
 
 const db = require("./db");
 const line = require("./line");
@@ -12,7 +12,9 @@ const gemini = require("./gemini");
 
 // 設定（環境変数で調整可）。
 const REMINDER_INTERVAL_MS = Number(process.env.REMINDER_INTERVAL_SEC || 60) * 1000;
-const DAILY_SUMMARY_INTERVAL_MS = Number(process.env.DAILY_SUMMARY_INTERVAL_MIN || 60) * 60 * 1000;
+const DEFAULT_DAILY_SUMMARY_INTERVAL_MIN = 5 * 60;
+const DAILY_SUMMARY_INTERVAL_MS =
+  Number(process.env.DAILY_SUMMARY_INTERVAL_MIN || DEFAULT_DAILY_SUMMARY_INTERVAL_MIN) * 60 * 1000;
 // 締切の何分手前を「1日前/1時間前」とみなすか。ループ間隔ぶんの取りこぼしを防ぐため少し広めの窓で見る。
 const WINDOW_1D_MIN = 24 * 60; // 24時間以内
 const WINDOW_1H_MIN = 60; // 1時間以内

@@ -54,6 +54,7 @@ data class UiState(
     val tasks: List<AiHelperClient.Task> = emptyList(),
     val tasksLoading: Boolean = false,
     val tasksError: String? = null,
+    val taskActionInProgressId: Long? = null,
     val showDoneTasks: Boolean = false,
     val summary: String? = null,
     val summaryLoading: Boolean = false,

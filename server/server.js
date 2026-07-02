@@ -1122,11 +1122,38 @@ app.post("/api/tasks", async (req, res) => {
   }
 });
 
+// 課題・予定の手動編集（Web のカレンダー画面から）。
+app.patch("/api/tasks/:id", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const { type, content, details, deadline } = req.body || {};
+  if (!content) return res.status(400).json({ ok: false, error: "内容が空です" });
+  const norm = normalizeDeadlineInput(deadline);
+  try {
+    const ok = await db.updateTask(account.email, req.params.id, {
+      type: type === "yotei" ? "yotei" : "kadai",
+      content: String(content).trim(),
+      details: details ? String(details).trim() : "",
+      deadline_at: norm.at,
+      date_only: norm.dateOnly,
+    });
+    if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.post("/api/tasks/:id/done", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
-    await db.setTaskStatus(Number(req.params.id), req.body?.status === "pending" ? "pending" : "done");
+    const ok = await db.setTaskStatus(
+      Number(req.params.id),
+      req.body?.status === "pending" ? "pending" : "done",
+      account.email
+    );
+    if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -1137,7 +1164,8 @@ app.delete("/api/tasks/:id", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   try {
-    await db.deleteTask(Number(req.params.id));
+    const ok = await db.deleteTask(Number(req.params.id), account.email);
+    if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -1593,10 +1621,6 @@ function renderDashboard(tableRows) {
           <h4 style="font-size:.85rem; margin:0 0 .4rem; font-weight:700">この日の要約</h4>
           <div id="calSelectedSummary" style="font-size:.85rem; line-height:1.5; white-space:pre-wrap"></div>
         </div>
-        <hr>
-        <h3 style="font-size:.95rem; margin:.4rem 0 .6rem">時間割の編集</h3>
-        <p class="muted" style="font-size:.8rem; margin:0 0 .5rem">Moodle/Waseda の自動取り込みが誤っている場合はここで修正できます（曜日・時限・科目名など）。取り込み直しをすると修正内容は失われます。</p>
-        <div id="calCoursesEdit"><p class="muted">時間割が未登録です。</p></div>
       </section>
 
       <section class="card panel" data-panel="summary">
@@ -1796,8 +1820,7 @@ function renderDashboard(tableRows) {
         if(t.deadline_at && t.deadline_at.slice(0,10) === calSelectedDate){
           const norm = t.deadline_at.replace('T',' ');
           const time = (!t.date_only && norm.length >= 16) ? norm.substring(11,16) : '終日';
-          const label = t.type === 'yotei' ? '予定' : '課題';
-          dayItems.push({ time, title: '[' + label + '] ' + t.content });
+          dayItems.push({ time, kind: 'task', task: t });
         }
       });
       allGoogleEvents.forEach(ev => {
@@ -1806,7 +1829,7 @@ function renderDashboard(tableRows) {
           if(dStr === calSelectedDate){
             const norm = ev.whenText.replace('T',' ');
             const time = norm.length >= 16 ? norm.substring(11,16) : '終日';
-            dayItems.push({ time, title: '[カレンダー] ' + ev.title });
+            dayItems.push({ time, kind: 'calendar', title: '[カレンダー] ' + ev.title });
           }
         }
       });
@@ -1815,20 +1838,21 @@ function renderDashboard(tableRows) {
       allCourses.forEach(c => {
         if(courseOccursOn(c, calSelectedDate)){
           const time = (c.period && PERIOD_TIMES[c.period]) ? PERIOD_TIMES[c.period] : '終日';
-          const room = c.room ? (' @' + c.room) : '';
-          dayItems.push({ time, title: '[授業] ' + c.name + room });
+          dayItems.push({ time, kind: 'course', course: c });
         }
       });
       dayItems.sort((a,b) => (a.time === '終日' ? '00:00' : a.time).localeCompare(b.time === '終日' ? '00:00' : b.time));
       if(!dayItems.length){
         $('calSelectedEvents').innerHTML = '<p class="muted">予定はありません。</p>';
       } else {
-        $('calSelectedEvents').innerHTML = dayItems.map(it => 
-          '<div class="card" style="margin:.3rem 0; padding:.6rem .8rem; display:flex; gap:.8rem; background:#fff; border:1px solid var(--line); border-radius:10px">' +
-          '<strong style="color:var(--accent); min-width:40px">' + it.time + '</strong>' +
-          '<span>' + escapeHtml(it.title) + '</span>' +
-          '</div>'
-        ).join('');
+        $('calSelectedEvents').innerHTML = dayItems.map(it => {
+          if(it.kind === 'task') return dayTaskItemHtml(it.task, it.time);
+          if(it.kind === 'course') return dayCourseItemHtml(it.course, it.time);
+          return '<div class="card" style="margin:.3rem 0; padding:.6rem .8rem; display:flex; gap:.8rem; background:#fff; border:1px solid var(--line); border-radius:10px">' +
+            '<strong style="color:var(--accent); min-width:40px">' + it.time + '</strong>' +
+            '<span>' + escapeHtml(it.title) + '</span>' +
+            '</div>';
+        }).join('');
       }
       $('calSelectedSummaryBox').style.display = 'none';
       try {
@@ -1839,6 +1863,64 @@ function renderDashboard(tableRows) {
           $('calSelectedSummary').textContent = j.summary;
         }
       } catch(e){}
+    }
+
+    // 選択した日の「授業」項目。編集フォームは courseRowHtml を 'day' prefix で共用する
+    // （アカウント画面の一覧と同時に描画されても要素 id が衝突しないようにするため）。
+    function dayCourseItemHtml(c, time){
+      return '<div style="margin:.3rem 0">' +
+        '<div class="muted" style="font-size:.75rem; margin:0 0 .1rem .1rem">' + time + '</div>' +
+        courseRowHtml(c, 'day') +
+        '</div>';
+    }
+
+    // 選択した日の「課題・予定」項目の編集。
+    let taskEditingId = null;
+    function isoForInput(deadlineAt){
+      return deadlineAt ? deadlineAt.replace(' ', 'T').slice(0,16) : '';
+    }
+    function dayTaskItemHtml(t, time){
+      const label = t.type === 'yotei' ? '予定' : '課題';
+      if(taskEditingId === t.id){
+        return '<div class="card" style="margin:.3rem 0; padding:.5rem .7rem; background:#fff; border:1px solid var(--line); border-radius:10px">' +
+          '<div class="row" style="gap:.4rem; flex-wrap:wrap">' +
+          '<select id="te_type_' + t.id + '" style="width:90px">' +
+          '<option value="kadai"' + (t.type!=='yotei'?' selected':'') + '>課題</option>' +
+          '<option value="yotei"' + (t.type==='yotei'?' selected':'') + '>予定</option>' +
+          '</select>' +
+          '<input id="te_content_' + t.id + '" value="' + escapeHtml(t.content) + '" placeholder="内容" style="flex:1; min-width:160px">' +
+          '<input id="te_deadline_' + t.id + '" type="datetime-local" value="' + isoForInput(t.deadline_at) + '" style="width:180px">' +
+          '</div>' +
+          '<input id="te_details_' + t.id + '" value="' + escapeHtml(t.details || '') + '" placeholder="詳細（任意）" style="width:100%; margin-top:.4rem">' +
+          '<div class="row" style="margin-top:.4rem; gap:.4rem">' +
+          '<button class="small" onclick="saveTaskEdit(' + t.id + ')">保存</button>' +
+          '<button class="ghost small" onclick="cancelTaskEdit()">キャンセル</button>' +
+          '</div></div>';
+      }
+      return '<div class="card" style="margin:.3rem 0; padding:.6rem .8rem; display:flex; gap:.8rem; justify-content:space-between; align-items:center; background:#fff; border:1px solid var(--line); border-radius:10px">' +
+        '<div style="display:flex; gap:.8rem; align-items:center; min-width:0"><strong style="color:var(--accent); min-width:40px">' + time + '</strong><span>[' + label + '] ' + escapeHtml(t.content) + '</span></div>' +
+        '<span class="row" style="gap:.3rem; flex-shrink:0">' +
+        '<button class="ghost small" onclick="startTaskEdit(' + t.id + ')">編集</button>' +
+        '<button class="ghost small" onclick="delTask(' + t.id + ')">削除</button>' +
+        '</span></div>';
+    }
+    function startTaskEdit(id){ taskEditingId = id; renderSelectedDateEvents(); }
+    function cancelTaskEdit(){ taskEditingId = null; renderSelectedDateEvents(); }
+    async function saveTaskEdit(id){
+      const content = $('te_content_' + id).value.trim();
+      if(!content){ alert('内容を入力してください'); return; }
+      const body = {
+        type: $('te_type_' + id).value,
+        content,
+        details: $('te_details_' + id).value.trim(),
+        deadline: $('te_deadline_' + id).value,
+      };
+      try {
+        const r = await fetch('/api/tasks/' + id, {method:'PATCH', headers:headers(), body:JSON.stringify(body)});
+        const j = await r.json();
+        if(j.ok){ taskEditingId = null; await loadTasks(); }
+        else alert('保存に失敗しました: ' + (j.error || ''));
+      } catch(e){ alert('通信エラー'); }
     }
 
     // ---- 認証・画面切替 ----
@@ -2032,57 +2114,59 @@ function renderDashboard(tableRows) {
         renderCalendar();
       } catch(e){}
     }
-    // ---- 時間割の編集（カレンダー画面下・アカウント画面の両方から使う）----
-    let courseEditingId = null;
-    function courseRowHtml(c){
+    // ---- 時間割の編集（アカウント画面の一覧・カレンダー画面の日別一覧の両方から使う）----
+    // 同じ科目が複数箇所（アカウント画面／カレンダーの日別一覧）に同時に描画され得るため、
+    // 呼び出し元ごとに prefix を分けて要素 id を一意にする（そうしないと id 重複により、
+    // 見えている方に入力しても隠れている方の古い値を保存してしまう）。
+    let courseEditingKey = null; // 例: 'acct-14' | 'day-14'
+    function courseRowHtml(c, prefix){
       const dayPeriod = c.day ? (c.day + '曜' + (c.period || '') + '限') : 'オンデマンド等';
       const room = c.room ? (' (' + c.room + ')') : '';
       const term = c.term ? ('[' + c.term + '] ') : '';
-      if(courseEditingId === c.id){
+      if(courseEditingKey === (prefix + '-' + c.id)){
         const dayOptions = ['', '月','火','水','木','金','土','日'].map(d =>
           '<option value="' + d + '"' + (d === (c.day || '') ? ' selected' : '') + '>' + (d || '(なし/オンデマンド)') + '</option>'
         ).join('');
         return '<div class="card" style="margin:.3rem 0; padding:.5rem .7rem; background:#fff; border:1px solid var(--line); border-radius:10px">' +
           '<div class="row" style="gap:.4rem; flex-wrap:wrap">' +
-          '<input id="ce_name_' + c.id + '" value="' + escapeHtml(c.name) + '" placeholder="科目名" style="flex:1; min-width:140px">' +
-          '<input id="ce_term_' + c.id + '" value="' + escapeHtml(c.term || '') + '" placeholder="学期(例: 春)" style="width:90px">' +
-          '<select id="ce_day_' + c.id + '" style="width:130px">' + dayOptions + '</select>' +
-          '<input id="ce_period_' + c.id + '" type="number" min="1" max="7" value="' + (c.period || '') + '" placeholder="時限" style="width:70px">' +
-          '<input id="ce_room_' + c.id + '" value="' + escapeHtml(c.room || '') + '" placeholder="教室" style="width:120px">' +
+          '<input id="ce_' + prefix + '_name_' + c.id + '" value="' + escapeHtml(c.name) + '" placeholder="科目名" style="flex:1; min-width:140px">' +
+          '<input id="ce_' + prefix + '_term_' + c.id + '" value="' + escapeHtml(c.term || '') + '" placeholder="学期(例: 春)" style="width:90px">' +
+          '<select id="ce_' + prefix + '_day_' + c.id + '" style="width:130px">' + dayOptions + '</select>' +
+          '<input id="ce_' + prefix + '_period_' + c.id + '" type="number" min="1" max="7" value="' + (c.period || '') + '" placeholder="時限" style="width:70px">' +
+          '<input id="ce_' + prefix + '_room_' + c.id + '" value="' + escapeHtml(c.room || '') + '" placeholder="教室" style="width:120px">' +
           '</div>' +
           '<div class="row" style="margin-top:.4rem; gap:.4rem">' +
-          '<button class="small" onclick="saveCourseEdit(' + c.id + ')">保存</button>' +
+          '<button class="small" onclick="saveCourseEdit(' + c.id + ',&#39;' + prefix + '&#39;)">保存</button>' +
           '<button class="ghost small" onclick="cancelCourseEdit()">キャンセル</button>' +
           '</div></div>';
       }
       return '<div style="padding:.3rem 0; border-bottom:1px dashed #f3f4f6; display:flex; justify-content:space-between; align-items:center; gap:.5rem">' +
         '<span>・' + term + '<strong>' + dayPeriod + '</strong> ' + escapeHtml(c.name) + escapeHtml(room) + '</span>' +
         '<span class="row" style="gap:.3rem; flex-shrink:0">' +
-        '<button class="ghost small" onclick="startCourseEdit(' + c.id + ')">編集</button>' +
+        '<button class="ghost small" onclick="startCourseEdit(' + c.id + ',&#39;' + prefix + '&#39;)">編集</button>' +
         '<button class="ghost small" onclick="deleteCourseRow(' + c.id + ')">削除</button>' +
         '</span></div>';
     }
     function renderCourseLists(){
-      const html = allCourses.length ? allCourses.map(courseRowHtml).join('') : '<p class="muted">時間割が未登録です。</p>';
+      const html = allCourses.length ? allCourses.map(c => courseRowHtml(c, 'acct')).join('') : '<p class="muted">時間割が未登録です。</p>';
       if($('wasedaCourses')) $('wasedaCourses').innerHTML = html;
-      if($('calCoursesEdit')) $('calCoursesEdit').innerHTML = html;
     }
-    function startCourseEdit(id){ courseEditingId = id; renderCourseLists(); }
-    function cancelCourseEdit(){ courseEditingId = null; renderCourseLists(); }
-    async function saveCourseEdit(id){
-      const name = $('ce_name_' + id).value.trim();
+    function startCourseEdit(id, prefix){ courseEditingKey = prefix + '-' + id; renderCourseLists(); renderSelectedDateEvents(); }
+    function cancelCourseEdit(){ courseEditingKey = null; renderCourseLists(); renderSelectedDateEvents(); }
+    async function saveCourseEdit(id, prefix){
+      const name = $('ce_' + prefix + '_name_' + id).value.trim();
       if(!name){ alert('科目名を入力してください'); return; }
       const body = {
         name,
-        term: $('ce_term_' + id).value.trim(),
-        day: $('ce_day_' + id).value,
-        period: $('ce_period_' + id).value ? Number($('ce_period_' + id).value) : null,
-        room: $('ce_room_' + id).value.trim(),
+        term: $('ce_' + prefix + '_term_' + id).value.trim(),
+        day: $('ce_' + prefix + '_day_' + id).value,
+        period: $('ce_' + prefix + '_period_' + id).value ? Number($('ce_' + prefix + '_period_' + id).value) : null,
+        room: $('ce_' + prefix + '_room_' + id).value.trim(),
       };
       try {
         const r = await fetch('/api/courses/' + id, {method:'PATCH', headers:headers(), body:JSON.stringify(body)});
         const j = await r.json();
-        if(j.ok){ courseEditingId = null; await loadWasedaCourses(); }
+        if(j.ok){ courseEditingKey = null; await loadWasedaCourses(); }
         else alert('保存に失敗しました: ' + (j.error || ''));
       } catch(e){ alert('通信エラー'); }
     }

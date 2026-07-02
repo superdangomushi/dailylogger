@@ -232,6 +232,47 @@ class AiHelperClient {
         }.getOrElse { Result.Error(it.message ?: "更新に失敗しました") }
     }
 
+    /** 課題・予定を編集する。deadline は空なら未定、日付のみなら date_only 扱いになる。 */
+    fun updateTask(
+        baseUrl: String, email: String, token: String, id: Long,
+        type: String, content: String, details: String, deadline: String,
+    ): Result {
+        val url = endpoint(baseUrl, "/api/tasks/$id")
+        val body = JSONObject()
+            .put("email", email).put("token", token)
+            .put("type", if (type == "yotei") "yotei" else "kadai")
+            .put("content", content)
+            .put("details", details)
+            .put("deadline", deadline)
+            .toString()
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "PATCH"
+                doOutput = true
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            readResult(conn, onOk = "保存しました")
+        }.getOrElse { Result.Error(it.message ?: "保存に失敗しました") }
+    }
+
+    /** 課題・予定を削除する。 */
+    fun deleteTask(baseUrl: String, email: String, token: String, id: Long): Result {
+        val url = endpoint(baseUrl, "/api/tasks/$id?email=${enc(email)}&token=${enc(token)}")
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE"
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                setRequestProperty("Accept", "application/json")
+            }
+            readResult(conn, onOk = "削除しました")
+        }.getOrElse { Result.Error(it.message ?: "削除に失敗しました") }
+    }
+
     /** Moodle の iCal URL を取得する。 */
     fun fetchMoodleUrl(baseUrl: String, email: String, token: String): kotlin.Result<String> {
         val url = endpoint(baseUrl, "/api/moodle?email=${enc(email)}&token=${enc(token)}")

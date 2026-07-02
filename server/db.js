@@ -458,12 +458,34 @@ async function listUpcomingTasks(email, { includeDone = false, limit = 100 } = {
   return rows;
 }
 
-async function setTaskStatus(id, status) {
-  await pool.query(`UPDATE tasks SET status = ? WHERE id = ?`, [status, id]);
+async function setTaskStatus(id, status, email = null) {
+  const [result] = email
+    ? await pool.query(`UPDATE tasks SET status = ? WHERE id = ? AND email = ?`, [status, id, email])
+    : await pool.query(`UPDATE tasks SET status = ? WHERE id = ?`, [status, id]);
+  return result.affectedRows > 0;
 }
 
-async function deleteTask(id) {
-  await pool.query(`DELETE FROM tasks WHERE id = ?`, [id]);
+// 手動編集（Web のカレンダー画面などから）。email を条件に含め、他アカウントの
+// タスクを操作できないようにする。deadline が変わるので通知済みフラグはリセットする。
+async function updateTask(email, id, { type, content, details, deadline_at, date_only }) {
+  const t = type === "yotei" ? "yotei" : "kadai";
+  const c = String(content || "").trim().slice(0, 512);
+  const key = dedupKey(email, t, c, deadline_at || null);
+  const [result] = await pool.query(
+    `UPDATE tasks SET
+       type = ?, content = ?, details = ?, deadline_at = ?, date_only = ?,
+       dedup_key = ?, notified_1d = 0, notified_1h = 0, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND email = ?`,
+    [t, c, details || null, deadline_at || null, date_only ? 1 : 0, key, id, email]
+  );
+  return result.affectedRows > 0;
+}
+
+async function deleteTask(id, email = null) {
+  const [result] = email
+    ? await pool.query(`DELETE FROM tasks WHERE id = ? AND email = ?`, [id, email])
+    : await pool.query(`DELETE FROM tasks WHERE id = ?`, [id]);
+  return result.affectedRows > 0;
 }
 
 // リマインド対象を探す。窓 [now, now+within分] に締切があり、まだ該当フラグが立っていない未完了タスク。
@@ -900,6 +922,7 @@ module.exports = {
   addTask,
   listUpcomingTasks,
   setTaskStatus,
+  updateTask,
   deleteTask,
   findDueTasks,
   markNotified,
