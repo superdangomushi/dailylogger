@@ -143,7 +143,7 @@ async function ensureSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
-  // 端末からアップロードされた音声ファイルのサーバー側文字起こしジョブ。
+  // 端末からアップロードされた音声ファイルを外部PCワーカーに渡すジョブ。
   // status: 'queued' → 'processing' → 'done' | 'error'
   await pool.query(`
     CREATE TABLE IF NOT EXISTS audio_jobs (
@@ -237,7 +237,7 @@ async function saveTranscript(email, filename, content) {
 }
 
 // テキストを保存（同じ email + filename は追記）。
-// サーバー側の音声文字起こし(audio.js)は録音1本ずつが独立した本文のため、
+// 外部PCワーカーから返る音声文字起こしは録音1本ずつが独立した本文のため、
 // 同じ時間帯に複数回録音停止すると同じファイル名（yyyy-MM-dd_HH.txt）になり得る。
 // saveTranscript のように上書きすると先の録音分が消えてしまうため、こちらは追記する。
 // 保存した行の id を返す。
@@ -630,13 +630,23 @@ async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
 }
 
 // 次の待機ジョブを1件つかんで processing にする（多重取得防止のため UPDATE で確保）。
-async function claimNextAudioJob() {
+// email を渡すと、そのユーザー本人のジョブだけを外部ワーカーへ渡す。
+async function claimNextAudioJob(email = null) {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
+    const where = ["status = 'queued'"];
+    const args = [];
+    if (email) {
+      where.push("email = ?");
+      args.push(email);
+    }
     const [rows] = await conn.query(
-      `SELECT id, email, filename, stored_path, mime FROM audio_jobs
-       WHERE status = 'queued' ORDER BY id ASC LIMIT 1 FOR UPDATE`
+      `SELECT id, email, filename, stored_path, mime, size_bytes, created_at
+       FROM audio_jobs
+       WHERE ${where.join(" AND ")}
+       ORDER BY id ASC LIMIT 1 FOR UPDATE`,
+      args
     );
     if (!rows[0]) {
       await conn.commit();
@@ -651,6 +661,17 @@ async function claimNextAudioJob() {
   } finally {
     conn.release();
   }
+}
+
+async function getClaimedAudioJob(email, id) {
+  const [rows] = await pool.query(
+    `SELECT id, email, filename, stored_path, mime, size_bytes, status
+     FROM audio_jobs
+     WHERE id = ? AND email = ? AND status = 'processing'
+     LIMIT 1`,
+    [id, email]
+  );
+  return rows[0] || null;
 }
 
 async function finishAudioJob(id, { status, error = null, transcriptId = null }) {
@@ -670,10 +691,17 @@ async function listAudioJobs(email, limit = 30) {
 }
 
 // サーバー再起動時、processing のまま残ったジョブを queued に戻す（処理が中断されたため）。
-async function requeueStaleAudioJobs() {
-  const [r] = await pool.query(
-    `UPDATE audio_jobs SET status = 'queued' WHERE status = 'processing'`
-  );
+async function requeueStaleAudioJobs(staleMinutes = null) {
+  const minutes = Number(staleMinutes);
+  const [r] = Number.isFinite(minutes) && minutes > 0
+    ? await pool.query(
+      `UPDATE audio_jobs SET status = 'queued'
+       WHERE status = 'processing' AND updated_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
+      [Math.floor(minutes)]
+    )
+    : await pool.query(
+      `UPDATE audio_jobs SET status = 'queued' WHERE status = 'processing'`
+    );
   return r.affectedRows;
 }
 
@@ -1051,6 +1079,7 @@ module.exports = {
   // audio jobs
   createAudioJob,
   claimNextAudioJob,
+  getClaimedAudioJob,
   finishAudioJob,
   listAudioJobs,
   requeueStaleAudioJobs,

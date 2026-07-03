@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS documents (
   UNIQUE KEY uq_doc (email, name)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
--- 端末からアップロードされた音声のサーバー側文字起こしジョブ。
+-- 端末からアップロードされた音声を外部PCワーカーへ渡すジョブ。
 -- status: 'queued'(待機) → 'processing'(処理中) → 'done'(完了) | 'error'(失敗)
 CREATE TABLE IF NOT EXISTS audio_jobs (
   id            INT AUTO_INCREMENT PRIMARY KEY,

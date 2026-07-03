@@ -51,7 +51,7 @@ const SUMMARY_PREGENERATE_LEAD_MIN = Number(process.env.DAILY_SUMMARY_PREGENERAT
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use(express.text({ type: "text/plain", limit: "10mb" }));
 // 資料アップロード（PDF 等）はバイナリで受ける。
 app.use(express.raw({ type: ["application/pdf", "application/octet-stream"], limit: "25mb" }));
@@ -804,7 +804,7 @@ app.post("/api/moodle/sync", async (req, res) => {
   }
 });
 
-// 音声ファイルの受信 → ジョブ登録（文字起こしはサーバー側ワーカーが非同期で実行）。
+// 音声ファイルの受信 → ジョブ登録（文字起こしは外部PCワーカーが非同期で実行）。
 // 端末での Whisper 処理の代わりに、録音した WAV をそのまま送れる。
 app.post("/api/audio", async (req, res) => {
   const account = await authFromReq(req);
@@ -832,6 +832,69 @@ app.get("/api/audio/jobs", async (req, res) => {
     const jobs = await db.listAudioJobs(account.email, Number(req.query.limit) || 30);
     res.json({ ok: true, jobs });
   } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 外部PCワーカー用: 自分のアカウントの queued 音声ジョブを1件確保する。
+app.post("/api/audio/worker/claim", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const job = await audio.claimRemoteJob(account.email);
+    if (!job) return res.json({ ok: true, job: null });
+    res.json({
+      ok: true,
+      job: {
+        ...job,
+        downloadPath: `/api/audio/worker/jobs/${job.id}/file`,
+        resultPath: `/api/audio/worker/jobs/${job.id}/result`,
+      },
+    });
+  } catch (e) {
+    console.error("外部音声ワーカーのジョブ確保に失敗:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 外部PCワーカー用: claim 済みジョブの音声本体をダウンロードする。
+app.get("/api/audio/worker/jobs/:id/file", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const job = await audio.getClaimedJob(account.email, req.params.id);
+    if (!job) return res.status(404).json({ ok: false, error: "処理中の音声ジョブが見つかりません" });
+    const filename = encodeURIComponent(job.filename || `audio-${job.id}.wav`);
+    res.setHeader("Content-Type", job.mime || "application/octet-stream");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${filename}`);
+    try {
+      const st = fs.statSync(job.stored_path);
+      res.setHeader("Content-Length", String(st.size));
+    } catch (_e) {
+      // sendFile 側のエラー処理に任せる。
+    }
+    res.sendFile(path.resolve(job.stored_path));
+  } catch (e) {
+    console.error("外部音声ワーカーの音声取得に失敗:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 外部PCワーカー用: ローカルPCで文字起こしした結果を返す。
+app.post("/api/audio/worker/jobs/:id/result", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const text = typeof req.body?.text === "string" ? req.body.text : "";
+  const error = req.body?.error ? String(req.body.error) : "";
+  if (!text && !error) {
+    return res.status(400).json({ ok: false, error: "text または error を指定してください" });
+  }
+  try {
+    const result = await audio.completeRemoteJob(account.email, req.params.id, { text, error });
+    if (!result.ok) return res.status(result.status || 500).json({ ok: false, error: result.error });
+    res.json(result);
+  } catch (e) {
+    console.error("外部音声ワーカーの結果保存に失敗:", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -1734,8 +1797,8 @@ function renderDashboard() {
         </div>
         <div id="docList" style="margin-top:.8rem"></div>
         <hr>
-        <h2>音声の文字起こし状況（サーバー処理）</h2>
-        <p class="muted">端末からアップロードされた音声はサーバーで順番に文字起こしされます。</p>
+        <h2>音声の文字起こし状況（PCワーカー処理）</h2>
+        <p class="muted">端末からアップロードされた音声はサーバーでキュー化され、ローカルPCワーカーが順番に文字起こしします。</p>
         <div class="row" style="margin-bottom:.5rem">
           <button class="ghost small" onclick="loadAudioJobs()">更新</button>
         </div>

@@ -8,6 +8,7 @@
 ## できること
 
 - 文字起こしの受信・保存（`POST /api/upload`）
+- 音声ファイルの受信・キュー化（`POST /api/audio`）と、ローカルPCワーカーによる文字起こし
 - Gemini による課題・予定の抽出（締切付き）と、このアップロード分の短い要約
 - 締切の **1日前 / 1時間前** リマインド（LINE push ＋ 端末通知用に記録、冪等）
 - **日次要約**（その日の文字起こしから「今日何があったか」を生成）
@@ -63,14 +64,30 @@ npm start          # http://localhost:3000
 | `GOOGLE_CLIENT_ID` | （空） | Web からの Google カレンダー連携用 OAuth クライアント ID |
 | `GOOGLE_CLIENT_SECRET` | （空） | 同シークレット。両方未設定なら Web の Google 連携は無効 |
 | `GOOGLE_REDIRECT_URL` | リクエストから自動 | OAuth リダイレクト URI を固定したい場合に指定 |
-| `WHISPER_DEVICE` | 自動判定 | ローカル文字起こしの実行先（`cuda` / `cpu`。通常は指定不要） |
-| `WHISPER_MODEL` | GPU: `large-v3` / CPU: `large-v3-turbo` | faster-whisper のモデル名 |
-| `WHISPER_COMPUTE` | GPU: `float16` / CPU: `int8` | faster-whisper の compute_type |
-| `WHISPER_BATCH` | GPU: `16` / CPU: `0`(無効) | バッチ推論のサイズ。大きいほど速いが VRAM を使う |
-| `WHISPER_CPU_THREADS` | 全コア | CPU 実行時のスレッド数 |
+| `AUDIO_WORKER_STALE_MIN` | `180` | 外部PCワーカーが落ちたとみなして音声ジョブを再キューするまでの分数 |
 
-文字起こしは GPU (NVIDIA) があれば自動で使う。GPU マシンでは `make gpu-driver`（初回のみ・要再起動）
-→ `make stt-deps` → `make gpu-check` の順にセットアップする。CUDA Toolkit の手動導入は不要。
+音声文字起こしは、公開サーバーの負荷を避けるため `../client` の外部PCワーカーで行う。
+Whisper / GPU / CUDA 関連の設定は `client/README.md` を参照。
+
+### 音声処理をローカルPCに逃がす
+
+公開サーバーは `POST /api/audio` で音声を受け取り、`audio_jobs` に `queued` として保存するだけにする。
+処理用PCでは同じリポジトリの `client/` で、公開サーバーURLと自分のアカウント情報を指定してワーカーを起動する。
+
+```bash
+cd client
+make stt-deps
+
+AIHELPER_SERVER_URL=https://your-server.example.com \
+AIHELPER_EMAIL=demo@AIHelper.jp \
+AIHELPER_TOKEN=demo-token-1234567890 \
+npm start
+```
+
+ワーカーは既定で10秒ごとに `/api/audio/worker/claim` を呼び、自分と同じ `email + token` の音声ジョブだけを確保する。
+その後 `/api/audio/worker/jobs/:id/file` で音声をダウンロードし、このPCで Whisper 処理を行い、
+`/api/audio/worker/jobs/:id/result` へ JSON で文字起こし結果を返す。ポーリング間隔は
+`AUDIO_WORKER_POLL_SEC=10` で変更できる。
 
 Web の Google 連携を有効にするには、Google Cloud Console で「OAuth クライアント ID（ウェブアプリケーション）」を作成し、
 承認済みリダイレクト URI に `https://<ドメイン>/api/google/callback` を登録して、上記 2 変数を `.env` などで渡す。
@@ -124,6 +141,10 @@ npm start
 | --- | --- | --- |
 | POST | `/api/login` | アカウント＋トークンの照合（LINE 連携状況も返す） |
 | POST | `/api/upload` | 文字起こし受信 → 保存 → Gemini で課題/予定/要約を抽出 |
+| POST | `/api/audio` | 音声ファイル受信 → 音声ジョブとしてキュー化 |
+| POST | `/api/audio/worker/claim` | 外部PCワーカーが自分の音声ジョブを1件確保 |
+| GET | `/api/audio/worker/jobs/:id/file` | claim 済み音声ジョブの音声本体を取得 |
+| POST | `/api/audio/worker/jobs/:id/result` | 外部PCワーカーが文字起こし結果またはエラーを返す |
 | GET | `/api/transcripts` | ログイン中ユーザーの文字起こし一覧 |
 | GET | `/api/transcripts/:id` | ログイン中ユーザーの文字起こし本文 |
 | POST | `/api/ask` | 秘書チャット。回答＋依頼（予定追加・完了化）の実行 |

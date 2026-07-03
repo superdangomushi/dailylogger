@@ -101,102 +101,6 @@ async function summarizeDocument({ name, mimeType, text, base64 }) {
   return out;
 }
 
-// ---- 音声ファイルの文字起こし（Files API 経由） ----
-// 1時間の WAV は 100MB を超え inlineData の上限(20MB)に収まらないため、
-// resumable アップロードで Files API に置いてから generateContent で参照する。
-const FILES_BASE = "https://generativelanguage.googleapis.com";
-
-async function uploadFile(filePath, mimeType, displayName) {
-  const fs = require("fs");
-  const size = fs.statSync(filePath).size;
-  // 1) アップロードセッション開始
-  const startRes = await fetch(`${FILES_BASE}/upload/v1beta/files`, {
-    method: "POST",
-    headers: {
-      "x-goog-api-key": API_KEY,
-      "X-Goog-Upload-Protocol": "resumable",
-      "X-Goog-Upload-Command": "start",
-      "X-Goog-Upload-Header-Content-Length": String(size),
-      "X-Goog-Upload-Header-Content-Type": mimeType,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ file: { display_name: displayName || "audio" } }),
-  });
-  if (!startRes.ok) {
-    throw new Error(`Files API 開始エラー ${startRes.status}: ${(await startRes.text()).slice(0, 300)}`);
-  }
-  const uploadUrl = startRes.headers.get("x-goog-upload-url");
-  if (!uploadUrl) throw new Error("Files API がアップロード URL を返しませんでした");
-  // 2) 本体を送信して確定
-  const data = fs.readFileSync(filePath);
-  const upRes = await fetch(uploadUrl, {
-    method: "POST",
-    headers: {
-      "X-Goog-Upload-Offset": "0",
-      "X-Goog-Upload-Command": "upload, finalize",
-    },
-    body: data,
-  });
-  if (!upRes.ok) {
-    throw new Error(`Files API 送信エラー ${upRes.status}: ${(await upRes.text()).slice(0, 300)}`);
-  }
-  return (await upRes.json()).file; // { name, uri, state, ... }
-}
-
-async function waitFileActive(fileName, { timeoutMs = 5 * 60_000 } = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const res = await fetch(`${FILES_BASE}/v1beta/${fileName}`, {
-      headers: { "x-goog-api-key": API_KEY },
-    });
-    if (!res.ok) throw new Error(`Files API 状態取得エラー ${res.status}`);
-    const f = await res.json();
-    if (f.state === "ACTIVE") return f;
-    if (f.state === "FAILED") throw new Error("Files API 側でファイル処理に失敗しました");
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-  throw new Error("Files API の処理待ちがタイムアウトしました");
-}
-
-// 音声ファイルを文字起こしして本文テキストを返す。
-async function transcribeAudio(filePath, mimeType, displayName) {
-  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
-  const uploaded = await uploadFile(filePath, mimeType, displayName);
-  const active = await waitFileActive(uploaded.name);
-  const body = {
-    contents: [{
-      role: "user",
-      parts: [
-        {
-          text:
-            "この音声を日本語で文字起こししてください。話された内容のみを、" +
-            "話者の言葉どおりに書き起こします。相づちやフィラー（えー、あの等）は省いて構いません。" +
-            "説明・前置き・タイムスタンプは不要で、書き起こし本文だけを出力してください。" +
-            "無音や聞き取れない場合は空文字を返してください。",
-        },
-        { fileData: { mimeType, fileUri: active.uri } },
-      ],
-    }],
-    generationConfig: { temperature: 0.1 },
-  };
-  const res = await fetch(ENDPOINT(MODEL), {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
-    body: JSON.stringify(body),
-  });
-  // 使い終わった Files API 上のファイルは消す（失敗しても致命的でない）。
-  fetch(`${FILES_BASE}/v1beta/${uploaded.name}`, {
-    method: "DELETE",
-    headers: { "x-goog-api-key": API_KEY },
-  }).catch(() => {});
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Gemini API エラー ${res.status}: ${t.slice(0, 300)}`);
-  }
-  const data = await res.json();
-  return data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("").trim() || "";
-}
-
 // =====================================================================
 // 1) 抽出 + 要約
 // =====================================================================
@@ -614,6 +518,6 @@ function localDate(date = new Date()) {
 }
 
 module.exports = {
-  analyze, summarizeDay, ask, extractTaskRequests, summarizeDocument, transcribeAudio,
+  analyze, summarizeDay, ask, extractTaskRequests, summarizeDocument,
   isConfigured, localDate, MODEL,
 };
