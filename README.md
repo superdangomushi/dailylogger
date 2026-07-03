@@ -135,11 +135,11 @@ npm start                                   # http://localhost:3000
 cd client
 make stt-deps
 
-AIHELPER_SERVER_URL=https://your-server.example.com \
-AIHELPER_EMAIL=demo@AIHelper.jp \
-AIHELPER_TOKEN=demo-token-1234567890 \
 npm start
 ```
+
+起動後に `http://127.0.0.1:39123` を開き、公開サーバーURLと処理したいアカウントのメール・パスワードを登録する。
+1台のPCで複数アカウント分を順番に処理できる。
 
 ---
 

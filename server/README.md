@@ -78,13 +78,13 @@ Whisper / GPU / CUDA 関連の設定は `client/README.md` を参照。
 cd client
 make stt-deps
 
-AIHELPER_SERVER_URL=https://your-server.example.com \
-AIHELPER_EMAIL=demo@AIHelper.jp \
-AIHELPER_TOKEN=demo-token-1234567890 \
 npm start
 ```
 
-ワーカーは既定で10秒ごとに `/api/audio/worker/claim` を呼び、自分と同じ `email + token` の音声ジョブだけを確保する。
+起動後、`http://127.0.0.1:39123` を開き、公開サーバーURLと処理したいアカウントのメール・パスワードを複数登録する。
+パスワードは `/api/login` に使うだけで、PC側には返ってきたトークンだけを保存する。
+
+ワーカーは既定で10秒ごとに `/api/audio/worker/claim` を呼び、登録済みアカウントと同じ `email + token` の音声ジョブだけを確保する。
 その後 `/api/audio/worker/jobs/:id/file` で音声をダウンロードし、このPCで Whisper 処理を行い、
 `/api/audio/worker/jobs/:id/result` へ JSON で文字起こし結果を返す。ポーリング間隔は
 `AUDIO_WORKER_POLL_SEC=10` で変更できる。

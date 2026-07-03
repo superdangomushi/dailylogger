@@ -425,9 +425,14 @@ function htmlPage() {
       return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
+    let baseUrlDirty = false;
+
     async function load() {
       const state = await api('/api/state');
-      $('baseUrl').value = state.baseUrl || '';
+      const baseUrlInput = $('baseUrl');
+      if (!baseUrlDirty && document.activeElement !== baseUrlInput) {
+        baseUrlInput.value = state.baseUrl || '';
+      }
       $('configPath').textContent = '設定: ' + state.configPath;
       $('topState').textContent = state.accounts.length + '件 / ' + state.pollSec + '秒間隔';
       if (!state.accounts.length) {
@@ -452,6 +457,7 @@ function htmlPage() {
 
     async function saveSettings() {
       await api('/api/settings', { method:'POST', body: JSON.stringify({ baseUrl: $('baseUrl').value }) });
+      baseUrlDirty = false;
       $('notice').textContent = 'サーバーURLを保存しました';
       await load();
     }
@@ -486,6 +492,10 @@ function htmlPage() {
       await load();
     }
 
+    $('baseUrl').addEventListener('input', () => { baseUrlDirty = true; });
+    $('baseUrl').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') saveSettings();
+    });
     $('saveSettings').addEventListener('click', saveSettings);
     $('addAccount').addEventListener('click', addAccount);
     setInterval(load, 3000);
@@ -510,11 +520,18 @@ async function handleUi(req, res) {
 
     if (req.method === "POST" && u.pathname === "/api/accounts") {
       const body = await readJson(req);
+      const originalBaseUrl = config.baseUrl;
       if (body.baseUrl) config.baseUrl = cleanBaseUrl(body.baseUrl);
       const email = String(body.email || "").trim();
       const password = String(body.password || "");
       if (!email || !password) return sendJson(res, 400, { ok: false, error: "メールとパスワードを入力してください" });
-      const loggedIn = await loginWithPassword(email, password);
+      let loggedIn;
+      try {
+        loggedIn = await loginWithPassword(email, password);
+      } catch (e) {
+        config.baseUrl = originalBaseUrl;
+        throw e;
+      }
       const existing = accountByEmail(loggedIn.email);
       const entry = {
         email: loggedIn.email,
