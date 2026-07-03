@@ -1,9 +1,10 @@
 # AIHelper local audio worker
 
 This directory is for each user's local PC. The public server in `../server`
-only stores audio jobs and exposes JSON/file APIs. This client polls the server,
-downloads jobs for the same `email + token`, transcribes them locally with
-faster-whisper, and posts the text back to the server.
+only stores audio jobs and exposes JSON/file APIs. This client polls the server
+for every enabled account configured in the local UI, downloads matching jobs,
+transcribes them locally with faster-whisper, and posts the text back to the
+server.
 
 ## Setup
 
@@ -20,13 +21,21 @@ is not visible, CPU transcription still works.
 
 ```bash
 cd client
-AIHELPER_SERVER_URL=https://your-server.example.com \
-AIHELPER_EMAIL=demo@AIHelper.jp \
-AIHELPER_TOKEN=demo-token-1234567890 \
 npm start
 ```
 
-The worker polls every 10 seconds by default. Change it with:
+Then open the local UI:
+
+```text
+http://127.0.0.1:39123
+```
+
+Set the public server URL, then add one or more accounts with email and
+password. The password is used only once for `/api/login`; the worker stores the
+returned token in `client/accounts.json` and does not save the password.
+
+The worker polls every enabled account every 10 seconds by default. Change it
+with:
 
 ```bash
 AUDIO_WORKER_POLL_SEC=5 npm start
@@ -37,8 +46,11 @@ AUDIO_WORKER_POLL_SEC=5 npm start
 | Variable | Default | Description |
 | --- | --- | --- |
 | `AIHELPER_SERVER_URL` | `http://localhost:3000` | Public AIHelper server URL |
-| `AIHELPER_EMAIL` | required | Account email. Must match `server/accounts.json` |
-| `AIHELPER_TOKEN` | required | Account token. Must match `server/accounts.json` |
+| `AUDIO_WORKER_UI_HOST` | `127.0.0.1` | Local UI bind host |
+| `AUDIO_WORKER_UI_PORT` | `39123` | Local UI port |
+| `AUDIO_WORKER_CONFIG` | `client/accounts.json` | Local account/token config file |
+| `AIHELPER_EMAIL` | empty | Optional single legacy account email |
+| `AIHELPER_TOKEN` | empty | Optional single legacy account token |
 | `AUDIO_WORKER_POLL_SEC` | `10` | Polling interval in seconds |
 | `AUDIO_WORKER_DIR` | `client/worker-audio` | Temporary audio download directory |
 | `WHISPER_DEVICE` | auto | `cuda` or `cpu` override |
@@ -50,10 +62,11 @@ AUDIO_WORKER_POLL_SEC=5 npm start
 
 ## Flow
 
-1. `POST /api/audio/worker/claim` claims one queued job for this account.
-2. `GET /api/audio/worker/jobs/:id/file` downloads the audio file.
-3. `client/stt/transcribe.py` transcribes the file on this PC.
-4. `POST /api/audio/worker/jobs/:id/result` sends `{ "text": "..." }` back.
+1. The local UI logs in with `POST /api/login` and stores tokens per account.
+2. `POST /api/audio/worker/claim` claims one queued job for each enabled account.
+3. `GET /api/audio/worker/jobs/:id/file` downloads the audio file.
+4. `client/stt/transcribe.py` transcribes the file on this PC.
+5. `POST /api/audio/worker/jobs/:id/result` sends `{ "text": "..." }` back.
 
 The server then saves the returned text as a transcript and runs the same
 Gemini analysis, task updates, cancellations, and daily-summary refresh as a

@@ -20,7 +20,7 @@ help:
 
 install: system-deps npm-deps stt-deps
 	@echo ""
-	@echo "Setup complete. Run 'make run' with AIHELPER_SERVER_URL, AIHELPER_EMAIL, and AIHELPER_TOKEN."
+	@echo "Setup complete. Run 'make run' and open the local UI to add accounts."
 
 system-deps:
 	@echo ">> Installing Node.js $(NODE_MAJOR).x, python3-venv, and ffmpeg"

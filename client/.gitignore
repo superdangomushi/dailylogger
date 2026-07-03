@@ -1,4 +1,6 @@
 node_modules/
 worker-audio/
 stt/.venv/
+accounts.json
+accounts.json.tmp
 *.log
