@@ -29,7 +29,11 @@ function isPrivateIPv4(ip) {
 
 function isPrivateIPv6(ip) {
   const s = ip.toLowerCase();
-  return s === "::1" || s.startsWith("fc") || s.startsWith("fd") || s.startsWith("fe80:");
+  if (s === "::1" || s === "::" || s.startsWith("fc") || s.startsWith("fd") || s.startsWith("fe80:")) return true;
+  // IPv4-mapped (::ffff:a.b.c.d) は埋め込み IPv4 で再判定。
+  const m = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (m) return isPrivateIPv4(m[1]);
+  return false;
 }
 
 async function assertPublicHttpUrl(url) {
