@@ -22,7 +22,7 @@ import java.io.File
 
 data class TranscriptItem(val name: String, val path: String, val sizeBytes: Long)
 
-/** 秘書チャットの1メッセージ。fromUser=true なら利用者の発話。 */
+/** AIチャットの1メッセージ。fromUser=true なら利用者の発話。 */
 data class ChatMessage(val text: String, val fromUser: Boolean)
 
 /** AIHelper.jp のログイン状態。 */
@@ -381,7 +381,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** サーバーに保存された秘書チャット履歴を取得し、画面上の会話を復元する。 */
+    /** サーバーに保存されたAIチャット履歴を取得し、画面上の会話を復元する。 */
     fun loadChatHistory() {
         if (!accountStore.loggedIn || _ui.value.chatHistoryLoading) return
         _ui.update { it.copy(chatHistoryLoading = true) }
@@ -584,7 +584,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 秘書に質問・依頼する。サーバー(Gemini)が回答し、「予定入れといて」等は登録まで実行する。
+     * AIに質問・依頼する。サーバー(Gemini)が回答し、「予定入れといて」等は登録まで実行する。
      */
     fun ask(question: String) {
         val q = question.trim()
@@ -612,7 +612,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update {
                 it.copy(chatLog = it.chatLog + ChatMessage(reply, false), askInProgress = false)
             }
-            // 秘書が予定・課題を追加/完了した可能性があるので、成功時は必ず一覧を更新。
+            // AIが予定・課題を追加/完了した可能性があるので、成功時は必ず一覧を更新。
             if (result.isSuccess) {
                 loadTasks()
             }
