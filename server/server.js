@@ -212,6 +212,13 @@ function escapeHtml(s) {
   );
 }
 
+// 例外の詳細（DB エラー・スタック・内部パス等）はクライアントへ返さない。
+// サーバーログには全文を残し、レスポンスには汎用メッセージだけを載せる。
+function serverErr(e, context) {
+  console.error(context ? `サーバーエラー(${context}):` : "サーバーエラー:", e?.message || e);
+  return "サーバー内部でエラーが発生しました";
+}
+
 // API 用の認証ヘルパ。ヘッダ（推奨）または互換用 JSON body から email+token を取り、照合する（非同期）。
 async function authFromReq(req) {
   const email = req.get("X-Account-Email") || req.body?.email || "";
@@ -317,7 +324,7 @@ app.get("/api/courses", async (req, res) => {
   try {
     res.json({ ok: true, courses: await db.listCourses(account.email) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -331,7 +338,7 @@ app.post("/api/courses", async (req, res) => {
     res.json({ ok: true, count: courses.length });
   } catch (e) {
     console.error("時間割の保存に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -347,7 +354,7 @@ app.patch("/api/courses/:id", async (req, res) => {
     if (!ok) return res.status(404).json({ ok: false, error: "科目が見つかりません" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -359,7 +366,7 @@ app.delete("/api/courses/:id", async (req, res) => {
     if (!ok) return res.status(404).json({ ok: false, error: "科目が見つかりません" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -394,7 +401,7 @@ app.post("/api/files", heavyLimiter, async (req, res) => {
     res.json({ ok: true, name, summary });
   } catch (e) {
     console.error("資料要約に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -405,7 +412,7 @@ app.get("/api/files", async (req, res) => {
     const docs = await db.listDocuments(account.email, 100);
     res.json({ ok: true, documents: docs });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -418,7 +425,7 @@ app.post("/api/google-link", async (req, res) => {
     await db.setGoogleEmail(account.email, googleEmail);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -431,7 +438,7 @@ app.post("/api/calendar/sync", async (req, res) => {
     await db.replaceCalendarEvents(account.email, events);
     res.json({ ok: true, count: events.length });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -441,10 +448,22 @@ app.post("/api/calendar/sync", async (req, res) => {
 // OAuth の state → どのユーザーの連携要求か（CSRF 対策。10分で失効）。
 const googleOAuthStates = new Map();
 
+// OAuth の redirect_uri。原則は環境変数 GOOGLE_REDIRECT_URL を明示指定する。
+// 未指定時のみ Host ヘッダから組み立てるが、Host ヘッダ汚染を防ぐため許可ホスト
+// （GOOGLE_ALLOWED_HOSTS のカンマ区切り、なければリクエストの Host）に限定し、本番では https を強制する。
 function googleRedirectUri(req) {
   if (process.env.GOOGLE_REDIRECT_URL) return process.env.GOOGLE_REDIRECT_URL;
-  const proto = req.headers["x-forwarded-proto"] || req.protocol || "http";
-  return `${proto}://${req.get("host")}/api/google/callback`;
+  const host = req.get("host") || "";
+  const allow = String(process.env.GOOGLE_ALLOWED_HOSTS || "")
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  if (allow.length && !allow.includes(host)) {
+    throw new Error("この Host からの Google 連携は許可されていません（GOOGLE_REDIRECT_URL を設定してください）");
+  }
+  const isProd = process.env.NODE_ENV === "production";
+  const proto = isProd
+    ? "https"
+    : (req.headers["x-forwarded-proto"] || req.protocol || "http");
+  return `${proto}://${host}/api/google/callback`;
 }
 
 // 同意画面の URL を返す。ブラウザ側はこの URL へ遷移する。
@@ -458,7 +477,12 @@ app.get("/api/google/auth-url", async (req, res) => {
     });
   }
   const state = crypto.randomBytes(24).toString("hex");
-  const redirectUri = googleRedirectUri(req);
+  let redirectUri;
+  try {
+    redirectUri = googleRedirectUri(req);
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
   googleOAuthStates.set(state, { email: account.email, redirectUri, expires: Date.now() + 10 * 60_000 });
   // 溜まった期限切れ state を掃除。
   for (const [k, v] of googleOAuthStates) if (v.expires < Date.now()) googleOAuthStates.delete(k);
@@ -492,7 +516,7 @@ app.get("/api/google/accounts", async (req, res) => {
     const rows = await db.listGoogleAccounts(account.email);
     res.json({ ok: true, configured: google.isConfigured(), accounts: rows.map((r) => r.google_email) });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -504,7 +528,7 @@ app.post("/api/google/unlink", async (req, res) => {
     await db.removeGoogleAccount(account.email, String(req.body?.googleEmail || ""));
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -550,7 +574,7 @@ app.get("/api/google/events", async (req, res) => {
     events.sort((a, b) => a.startMillis - b.startMillis);
     res.json({ ok: true, events, error: errors.join(" / ") || undefined });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -568,7 +592,7 @@ app.post("/api/google/add-event", async (req, res) => {
     const token = await google.accessTokenOf(decryptCred(row.refresh_token));
     await google.insertDeadline(token, content, String(req.body?.deadline || ""), Boolean(req.body?.dateOnly));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -667,7 +691,7 @@ app.post("/api/google/sync-courses", async (req, res) => {
 
     res.json({ ok: true, count: successCount, skipped: skippedCount, googleEmail: row.google_email });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -680,7 +704,7 @@ app.get("/api/moodle", async (req, res) => {
     const url = await db.getMoodleUrl(account.email);
     res.json({ ok: true, url: url || "" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -695,7 +719,7 @@ app.get("/api/stt-quality", async (req, res) => {
     const quality = await db.getSttQuality(account.email);
     res.json({ ok: true, quality, choices: STT_QUALITIES });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -710,7 +734,7 @@ app.post("/api/stt-quality", async (req, res) => {
     await db.setSttQuality(account.email, quality);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -725,7 +749,7 @@ app.post("/api/moodle", async (req, res) => {
     await db.setMoodleUrl(account.email, url);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -742,7 +766,7 @@ app.get("/api/waseda", async (req, res) => {
       hasPassword: Boolean(row?.waseda_password_enc),
     });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -789,7 +813,7 @@ app.post("/api/waseda/sync", async (req, res) => {
       return res.status(400).json({ ok: false, error: "先に Waseda アカウントを保存してください" });
     }
   } catch (e) {
-    return res.status(500).json({ ok: false, error: e.message });
+    return res.status(500).json({ ok: false, error: serverErr(e) });
   }
   const job = { state: "running", message: "時間割を取得しています…", log: "", startedAt: Date.now() };
   wasedaSyncJobs.set(account.email, job);
@@ -881,7 +905,7 @@ app.post("/api/moodle/sync", heavyLimiter, async (req, res) => {
     res.json({ ok: true, imported });
   } catch (e) {
     console.error(`Moodle 同期に失敗 (${account.email}):`, e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -913,7 +937,7 @@ app.get("/api/audio/jobs", async (req, res) => {
     const jobs = await db.listAudioJobs(account.email, Number(req.query.limit) || 30);
     res.json({ ok: true, jobs });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -934,7 +958,7 @@ app.post("/api/audio/worker/claim", async (req, res) => {
     });
   } catch (e) {
     console.error("外部音声ワーカーのジョブ確保に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -957,7 +981,7 @@ app.get("/api/audio/worker/jobs/:id/file", async (req, res) => {
     res.sendFile(path.resolve(job.stored_path));
   } catch (e) {
     console.error("外部音声ワーカーの音声取得に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -976,7 +1000,7 @@ app.post("/api/audio/worker/jobs/:id/result", async (req, res) => {
     res.json(result);
   } catch (e) {
     console.error("外部音声ワーカーの結果保存に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1044,7 +1068,7 @@ app.get("/api/transcripts", async (req, res) => {
     const transcripts = await db.listTranscriptsByEmail(account.email, limit);
     res.json({ ok: true, transcripts });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1057,7 +1081,7 @@ app.get("/api/transcripts/:id", async (req, res) => {
     if (!row) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true, transcript: row });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1216,7 +1240,7 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
     res.json({ ok: true, reply, applied });
   } catch (e) {
     console.error("ask に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1228,7 +1252,7 @@ app.get("/api/chat/history", async (req, res) => {
     const messages = await db.listRecentChatMessages(account.email, 50);
     res.json({ ok: true, messages });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1302,7 +1326,7 @@ app.get("/api/tasks", async (req, res) => {
     const tasks = await db.listUpcomingTasks(account.email, { includeDone });
     res.json({ ok: true, tasks });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1322,7 +1346,7 @@ app.post("/api/tasks", async (req, res) => {
     });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1344,7 +1368,7 @@ app.patch("/api/tasks/:id", async (req, res) => {
     if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1360,7 +1384,7 @@ app.post("/api/tasks/:id/done", async (req, res) => {
     if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1372,7 +1396,7 @@ app.delete("/api/tasks/:id", async (req, res) => {
     if (!ok) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1399,7 +1423,7 @@ app.get("/api/summary/:day", async (req, res) => {
     const row = await db.getDailySummary(account.email, day);
     res.json({ ok: true, day, summary: row ? row.summary : "", generated_at: row?.generated_at || null });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1413,7 +1437,7 @@ app.post("/api/summary/:day/generate", heavyLimiter, async (req, res) => {
     const summary = await reminders.generateDailySummary(account.email, day);
     res.json({ ok: true, day, summary, empty: !summary });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1424,7 +1448,7 @@ app.get("/api/summaries", async (req, res) => {
     const rows = await db.listDailySummaries(account.email, 30);
     res.json({ ok: true, summaries: rows });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1440,7 +1464,7 @@ app.get("/api/reminders", async (req, res) => {
     const items = await db.pendingNotifications(account.email);
     res.json({ ok: true, reminders: items });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1452,7 +1476,7 @@ app.post("/api/reminders/ack", async (req, res) => {
     await db.ackNotifications(account.email, req.body?.ids || []);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1496,7 +1520,7 @@ async function serveAnalysisCsv(req, res, kind, label) {
   try {
     data = await db.getAnalysisForEmail(account.email, req.params.id, kind);
   } catch (e) {
-    return res.status(500).type("text/plain").send("DB 接続エラー: " + e.message);
+    return res.status(500).type("text/plain").send(serverErr(e, "db"));
   }
   if (!data) return res.status(404).type("text/plain").send("見つかりません");
   const base = data.filename.replace(/\.[^.]+$/, "");
@@ -1519,7 +1543,7 @@ app.get("/api/transcript/:id", async (req, res) => {
     if (!row) return res.status(404).json({ ok: false, error: "見つかりません" });
     res.json({ ok: true, filename: row.filename, content: row.content, summary: row.summary || "" });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
@@ -1530,7 +1554,7 @@ app.get("/download/:id", async (req, res) => {
   try {
     row = await db.getTranscriptForEmail(account.email, req.params.id);
   } catch (e) {
-    return res.status(500).type("text/plain").send("DB 接続エラー: " + e.message);
+    return res.status(500).type("text/plain").send(serverErr(e, "db"));
   }
   if (!row) return res.status(404).type("text/plain").send("見つかりません");
   res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -1550,7 +1574,7 @@ app.post("/api/send-summary", async (req, res) => {
     res.json({ ok: true, ...result });
   } catch (e) {
     console.error("日次サマリ送信に失敗:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
+    res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
