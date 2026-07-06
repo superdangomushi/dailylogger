@@ -5,18 +5,76 @@
 // 認証不要に取得できるためこの方式を使う。
 
 const db = require("./db");
+const dns = require("dns").promises;
+const net = require("net");
 
-// iCal を取得（リダイレクト追従。https/http のみ）。
-function fetchIcs(url, redirectsLeft = 5) {
-  return new Promise((resolve, reject) => {
-    let mod, u;
-    try {
-      u = new URL(url);
-      mod = u.protocol === "http:" ? require("http") : require("https");
-    } catch (e) {
-      return reject(new Error("URL が不正です"));
+const MAX_ICS_BYTES = Math.max(Number(process.env.MOODLE_MAX_ICS_BYTES || 2 * 1024 * 1024), 1024);
+
+function isPrivateIPv4(ip) {
+  const parts = ip.split(".").map((x) => Number(x));
+  if (parts.length !== 4 || parts.some((x) => !Number.isInteger(x) || x < 0 || x > 255)) return true;
+  const [a, b] = parts;
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    a >= 224 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19))
+  );
+}
+
+function isPrivateIPv6(ip) {
+  const s = ip.toLowerCase();
+  return s === "::1" || s.startsWith("fc") || s.startsWith("fd") || s.startsWith("fe80:");
+}
+
+async function assertPublicHttpUrl(url) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch (_e) {
+    throw new Error("URL が不正です");
+  }
+  if (u.protocol !== "https:") {
+    throw new Error("Moodle URL は https のみ使用できます");
+  }
+  if (u.username || u.password) {
+    throw new Error("ユーザー名・パスワードを含む URL は使用できません");
+  }
+  const host = u.hostname;
+  if (!host || host === "localhost") throw new Error("このホストには接続できません");
+  const ipType = net.isIP(host);
+  if (ipType === 4) {
+    if (isPrivateIPv4(host)) throw new Error("このホストには接続できません");
+    return { url: u, address: host, family: 4 };
+  }
+  if (ipType === 6) {
+    if (isPrivateIPv6(host)) throw new Error("このホストには接続できません");
+    return { url: u, address: host, family: 6 };
+  }
+  const addresses = await dns.lookup(host, { all: true, verbatim: true });
+  if (!addresses.length) throw new Error("ホスト名を解決できません");
+  for (const a of addresses) {
+    if ((a.family === 4 && isPrivateIPv4(a.address)) || (a.family === 6 && isPrivateIPv6(a.address))) {
+      throw new Error("このホストには接続できません");
     }
-    const req = mod.get(u, (res) => {
+  }
+  return { url: u, address: addresses[0].address, family: addresses[0].family };
+}
+
+// iCal を取得（リダイレクト追従。SSRF 対策のため https の公開アドレスのみ許可）。
+async function fetchIcs(url, redirectsLeft = 5) {
+  const checked = await assertPublicHttpUrl(url);
+  const u = checked.url;
+  return new Promise((resolve, reject) => {
+    const mod = require("https");
+    const req = mod.get(u, {
+      lookup: (_hostname, _options, cb) => cb(null, checked.address, checked.family),
+    }, (res) => {
       const status = res.statusCode || 0;
       if (status >= 300 && status < 400 && res.headers.location && redirectsLeft > 0) {
         res.resume();
@@ -28,8 +86,16 @@ function fetchIcs(url, redirectsLeft = 5) {
         return reject(new Error(`iCal 取得に失敗 (HTTP ${status})`));
       }
       let data = "";
+      let bytes = 0;
       res.setEncoding("utf8");
-      res.on("data", (c) => (data += c));
+      res.on("data", (c) => {
+        bytes += Buffer.byteLength(c, "utf8");
+        if (bytes > MAX_ICS_BYTES) {
+          req.destroy(new Error("iCal が大きすぎます"));
+          return;
+        }
+        data += c;
+      });
       res.on("end", () => resolve(data));
     });
     req.on("error", (e) => reject(e));
