@@ -117,6 +117,18 @@ async function main() {
     }
     console.log(`Google: ${grows.length} 件を確認`);
 
+    // 3) ユーザーごとの Gemini API キー
+    const [krows] = await pool.query(
+      "SELECT email, gemini_api_key_enc FROM users WHERE gemini_api_key_enc IS NOT NULL AND gemini_api_key_enc <> ''"
+    );
+    for (const r of krows) {
+      const next = reencrypt(r.gemini_api_key_enc, oldKey, newKey, counters);
+      if (next && !DRY_RUN) {
+        await pool.query("UPDATE users SET gemini_api_key_enc = ? WHERE email = ?", [next, r.email]);
+      }
+    }
+    console.log(`Gemini APIキー: ${krows.length} 件を確認`);
+
     console.log(
       `${DRY_RUN ? "[dry-run] " : ""}再暗号化: ${counters.converted} 件 / スキップ(旧鍵で解けず): ${counters.skipped} 件`
     );

@@ -12,7 +12,8 @@
 #
 # DB 認証やキーは変数/環境変数で上書き可。例:
 #   make install DB_PASSWORD=好きなパスワード
-#   make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
+#   make run LINE_CHANNEL_ACCESS_TOKEN=yyy
+# Gemini API キーはサーバー環境変数ではなく、各ユーザーがダッシュボードで登録する。
 
 # ---- 設定 (make VAR=値 で上書き可) ----
 NODE_MAJOR  ?= 20

@@ -209,6 +209,9 @@ async function ensureSchema() {
 
   // Moodle カレンダーの iCal 書き出し URL（ユーザーごと）。
   await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
+  // ユーザー自身が登録する Gemini API キー（AES-256-GCM 暗号化。暗号化は呼び出し側）。
+  // サーバー共通の GEMINI_API_KEY(.env) は廃止し、AI機能はこのキーで動く。
+  await addColumnIfMissing("users", "gemini_api_key_enc", "VARCHAR(1024) NULL");
   // 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
   await addColumnIfMissing("users", "stt_quality", "VARCHAR(16) NOT NULL DEFAULT 'high'");
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
@@ -1031,6 +1034,22 @@ async function getSttQuality(email) {
   return (rows[0] && rows[0].stt_quality) || "high";
 }
 
+// ユーザーごとの Gemini API キー（暗号化済み文字列を保存。暗号化/復号は呼び出し側）。
+async function setGeminiKeyEnc(email, enc) {
+  const [r] = await pool.query(
+    `UPDATE users SET gemini_api_key_enc = ? WHERE email = ?`,
+    [enc || null, email]
+  );
+  return r.affectedRows;
+}
+
+async function getGeminiKeyEnc(email) {
+  const [rows] = await pool.query(
+    `SELECT gemini_api_key_enc FROM users WHERE email = ? LIMIT 1`, [email]
+  );
+  return (rows[0] && rows[0].gemini_api_key_enc) || null;
+}
+
 async function setMoodleUrl(email, url) {
   await pool.query(`UPDATE users SET moodle_ical_url = ? WHERE email = ?`, [url || null, email]);
 }
@@ -1241,6 +1260,8 @@ module.exports = {
   getMoodleUrl,
   setSttQuality,
   getSttQuality,
+  setGeminiKeyEnc,
+  getGeminiKeyEnc,
   listUsersWithMoodle,
   setWasedaCreds,
   getWasedaCreds,

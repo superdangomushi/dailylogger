@@ -48,8 +48,12 @@ async function finishJobWithText(job, text) {
   const transcriptId = await db.appendTranscript(job.email, txtName, body);
 
   // 課題・予定・要約の抽出も同じパイプラインで実行（失敗しても文字起こし自体は成功扱い）。
+  // Gemini APIキーはジョブ所有者のものを使う。未登録ならスキップ（文字起こしは残る）。
   try {
-    const result = await gemini.analyze(body);
+    if (!(await gemini.isConfiguredFor(job.email))) {
+      throw new Error(gemini.NO_KEY_MESSAGE);
+    }
+    const result = await gemini.analyze(job.email, body);
     await db.saveAnalysis(transcriptId, result.kadai, result.yotei, result.summary);
     await db.upsertTasks(job.email, result.tasks, transcriptId);
     const updated = await db.applyTaskUpdates(job.email, result.updates);

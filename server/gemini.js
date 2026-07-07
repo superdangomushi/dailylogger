@@ -1,15 +1,20 @@
 // Gemini 連携。追加ライブラリは使わず Node 標準の fetch で Generative Language API を呼ぶ。
 //
-// 提供する機能:
-//   analyze(content)      ... 文字起こしから「課題」「予定」を抽出し、短い要約も返す
-//   summarizeDay(day, …)  ... 1日分の文字起こしから「今日の出来事の要約」を作る
-//   ask(question, ctx)    ... 蓄積データを文脈に、AIアシスタントとして自然文で回答＋必要なら操作コマンドを返す
+// API キーはサーバー共通の環境変数ではなく、**ユーザーごとに登録されたもの**を使う
+// （users.gemini_api_key_enc に AES-256-GCM で暗号化保存。ダッシュボードから登録）。
+// そのため各機能は対象ユーザーの email を第一引数に取り、そのユーザーのキーで呼ぶ。
 //
-// 必要な環境変数:
-//   GEMINI_API_KEY ... Google AI Studio で発行した API キー（未設定なら各機能はスキップ/例外）
-//   GEMINI_MODEL   ... 使用モデル（既定 gemini-2.5-flash）
+// 提供する機能:
+//   analyze(email, content)      ... 文字起こしから「課題」「予定」を抽出し、短い要約も返す
+//   summarizeDay(email, day, …)  ... 1日分の文字起こしから「今日の出来事の要約」を作る
+//   ask(email, question, ctx)    ... 蓄積データを文脈に、AIアシスタントとして自然文で回答＋必要なら操作コマンドを返す
+//
+// 環境変数:
+//   GEMINI_MODEL ... 使用モデル（既定 gemini-2.5-flash。サーバー共通）
 
-const API_KEY = process.env.GEMINI_API_KEY || "";
+const db = require("./db");
+const { decryptCred } = require("./cred");
+
 const MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 const ENDPOINT = (model) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
@@ -17,11 +22,49 @@ const ENDPOINT = (model) =>
 // 日付のみで時刻が不明な締切に補う既定時刻（締切は1日の終わり=23:59 とみなす）。
 const DEFAULT_DEADLINE_TIME = "23:59";
 
-const isConfigured = () => Boolean(API_KEY);
+// キー未登録時に投げる/表示するメッセージ（ダッシュボードへの導線を含める）。
+const NO_KEY_MESSAGE = "Gemini APIキーが未登録です。ダッシュボードの「アカウント」タブで登録してください";
+
+// ユーザーの Gemini API キーを復号して返す（未登録なら ""）。
+async function apiKeyFor(email) {
+  const enc = await db.getGeminiKeyEnc(email);
+  if (!enc) return "";
+  try {
+    return decryptCred(enc);
+  } catch (e) {
+    console.error(`Gemini APIキーの復号に失敗 (${email}):`, e.message);
+    return "";
+  }
+}
+
+// このユーザーで Gemini 機能が使えるか（キー登録済みか）。
+async function isConfiguredFor(email) {
+  return Boolean(await apiKeyFor(email));
+}
+
+async function requireApiKey(email) {
+  const key = await apiKeyFor(email);
+  if (!key) throw new Error(NO_KEY_MESSAGE);
+  return key;
+}
+
+// キー登録時の疎通確認。モデル情報の GET が通れば有効なキーとみなす。
+// 戻り値: { ok, error? }
+async function verifyApiKey(apiKey) {
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}`, {
+      headers: { "x-goog-api-key": apiKey },
+    });
+    if (res.ok) return { ok: true };
+    const text = await res.text().catch(() => "");
+    return { ok: false, error: `Gemini API エラー ${res.status}: ${text.slice(0, 200)}` };
+  } catch (e) {
+    return { ok: false, error: `Gemini API へ接続できません: ${e.message}` };
+  }
+}
 
 // ---- 低レベル: JSON モードで1回 generateContent を呼ぶ ----
-async function callJson(prompt, responseSchema, { temperature = 0.2 } = {}) {
-  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
+async function callJson(apiKey, prompt, responseSchema, { temperature = 0.2 } = {}) {
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: {
@@ -32,7 +75,7 @@ async function callJson(prompt, responseSchema, { temperature = 0.2 } = {}) {
   };
   const res = await fetch(ENDPOINT(MODEL), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -50,11 +93,10 @@ async function callJson(prompt, responseSchema, { temperature = 0.2 } = {}) {
 }
 
 // ---- 低レベル: ふつうのテキスト応答 ----
-async function callText(prompt, { temperature = 0.3 } = {}) {
-  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
+async function callText(apiKey, prompt, { temperature = 0.3 } = {}) {
   const res = await fetch(ENDPOINT(MODEL), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: { temperature },
@@ -70,8 +112,8 @@ async function callText(prompt, { temperature = 0.3 } = {}) {
 
 // ---- 資料ファイルの要約（PDF は inlineData、TXT はテキストで渡す） ----
 // opts: { name, mimeType, text?, base64? }
-async function summarizeDocument({ name, mimeType, text, base64 }) {
-  if (!API_KEY) throw new Error("GEMINI_API_KEY が未設定です");
+async function summarizeDocument(email, { name, mimeType, text, base64 }) {
+  const apiKey = await requireApiKey(email);
   const instruction =
     `次の資料「${name}」の内容を日本語で要約してください。` +
     `要点を箇条書き中心に300〜600字程度で。課題・提出物・締切・日付があれば必ず明記してください。`;
@@ -85,7 +127,7 @@ async function summarizeDocument({ name, mimeType, text, base64 }) {
   }
   const res = await fetch(ENDPOINT(MODEL), {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": API_KEY },
+    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
     body: JSON.stringify({
       contents: [{ role: "user", parts }],
       generationConfig: { temperature: 0.3 },
@@ -195,9 +237,10 @@ function buildAnalyzePrompt(content, today) {
 
 // 文字起こしを解析して { kadai[], yotei[], tasks[], cancellations[], updates[], summary } を返す。
 // kadai/yotei は後方互換（{deadline,content,details}）、tasks は正規化済み（deadline_at 付き）。
-async function analyze(content, opts = {}) {
+async function analyze(email, content, opts = {}) {
+  const apiKey = await requireApiKey(email);
   const today = opts.today || localDate();
-  const parsed = await callJson(buildAnalyzePrompt(content, today), ANALYZE_SCHEMA, {
+  const parsed = await callJson(apiKey, buildAnalyzePrompt(content, today), ANALYZE_SCHEMA, {
     temperature: 0.2,
   });
 
@@ -272,7 +315,8 @@ async function analyze(content, opts = {}) {
 // 2) 日次要約
 // =====================================================================
 // transcripts: [{ filename, content, summary }]
-async function summarizeDay(day, transcripts) {
+async function summarizeDay(email, day, transcripts) {
+  const apiKey = await requireApiKey(email);
   const material = (transcripts || [])
     .map((t, i) => `--- (${i + 1}) ${t.filename || ""} ---\n${t.content || ""}`)
     .join("\n\n")
@@ -291,7 +335,7 @@ async function summarizeDay(day, transcripts) {
     material,
   ].join("\n");
 
-  return callText(prompt, { temperature: 0.3 });
+  return callText(apiKey, prompt, { temperature: 0.3 });
 }
 
 // =====================================================================
@@ -322,7 +366,8 @@ const ASK_SCHEMA = {
 
 // question: 利用者の発話。 ctx: { today, tasks:[…], summaries:[{day,summary}] }
 // 戻り値: { reply, actions:[{op, type, content, details, deadline_at, date_only, target}] }
-async function ask(question, ctx = {}) {
+async function ask(email, question, ctx = {}) {
+  const apiKey = await requireApiKey(email);
   const today = ctx.today || localDate();
   const tasksText = (ctx.tasks || [])
     .map(
@@ -430,7 +475,7 @@ async function ask(question, ctx = {}) {
     "  actions を入れること。逆に actions に入れていないのに reply で『登録した』と言ってはいけない。",
   ].join("\n");
 
-  const parsed = await callJson(prompt, ASK_SCHEMA, { temperature: 0.4 });
+  const parsed = await callJson(apiKey, prompt, ASK_SCHEMA, { temperature: 0.4 });
   const actions = (Array.isArray(parsed.actions) ? parsed.actions : [])
     .filter((a) => a && a.op && a.op !== "none")
     .map((a) => {
@@ -458,7 +503,8 @@ const TASK_REQUEST_SCHEMA = {
   required: ["tasks"],
 };
 
-async function extractTaskRequests(question, today = localDate()) {
+async function extractTaskRequests(email, question, today = localDate()) {
+  const apiKey = await requireApiKey(email);
   const prompt = [
     "次の発話はアプリ利用者の依頼です。登録すべき課題・予定があればすべて抽出してください。",
     `本日は ${today} です。「明日」「来週の金曜」等の相対表現はこの日付基準で YYYY-MM-DD`,
@@ -469,7 +515,7 @@ async function extractTaskRequests(question, today = localDate()) {
     "【発話】",
     question,
   ].join("\n");
-  const parsed = await callJson(prompt, TASK_REQUEST_SCHEMA, { temperature: 0.1 });
+  const parsed = await callJson(apiKey, prompt, TASK_REQUEST_SCHEMA, { temperature: 0.1 });
   return (Array.isArray(parsed.tasks) ? parsed.tasks : [])
     .map((t) => {
       const norm = normalizeDeadline(String(t.deadline ?? "").trim());
@@ -519,5 +565,5 @@ function localDate(date = new Date()) {
 
 module.exports = {
   analyze, summarizeDay, ask, extractTaskRequests, summarizeDocument,
-  isConfigured, localDate, MODEL,
+  isConfiguredFor, verifyApiKey, localDate, MODEL, NO_KEY_MESSAGE,
 };

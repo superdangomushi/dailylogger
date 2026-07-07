@@ -80,18 +80,19 @@ async function checkReminders(resolveLineTarget) {
 }
 
 // 指定 email・day の日次要約を生成して保存する。戻り値は要約文字列（材料が無ければ ""）。
+// Gemini APIキーはユーザーごと。未登録ユーザーは静かにスキップする。
 async function generateDailySummary(email, day) {
-  if (!gemini.isConfigured()) return "";
+  if (!(await gemini.isConfiguredFor(email))) return "";
   const transcripts = await db.getTranscriptsForDay(email, day);
   if (!transcripts.length) return "";
-  const summary = await gemini.summarizeDay(day, transcripts);
+  const summary = await gemini.summarizeDay(email, day, transcripts);
   if (summary) await db.saveDailySummary(email, day, summary);
   return summary;
 }
 
 // 全アクティブアカウントについて「今日」の要約を作り直す。
+// （キー未登録のユーザーは generateDailySummary 内でスキップされる）
 async function refreshTodaySummaries() {
-  if (!gemini.isConfigured()) return;
   const day = gemini.localDate();
   let emails = [];
   try {
@@ -124,7 +125,9 @@ function start(resolveLineTarget) {
   );
   console.log(`リマインド監視を開始（${REMINDER_INTERVAL_MS / 1000}秒間隔）`);
 
-  if (DAILY_SUMMARY_INTERVAL_MS > 0 && gemini.isConfigured()) {
+  // Gemini キーはユーザーごとの登録制なので、タイマー自体は常に動かして
+  // キー登録済みユーザーの分だけ生成する。
+  if (DAILY_SUMMARY_INTERVAL_MS > 0) {
     summaryTimer = setInterval(
       () => refreshTodaySummaries().catch((e) => console.error(e)),
       DAILY_SUMMARY_INTERVAL_MS

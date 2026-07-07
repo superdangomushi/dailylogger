@@ -35,6 +35,7 @@ const crypto = require("crypto");
 })();
 
 const db = require("./db");
+const { encryptCred, decryptCred } = require("./cred");
 const gemini = require("./gemini");
 const line = require("./line");
 const summary = require("./summary");
@@ -159,37 +160,8 @@ function genToken() {
   return crypto.randomBytes(24).toString("hex"); // 48 hex chars
 }
 
-// ---- Waseda パスワード等の可逆暗号化（AES-256-GCM） ----
-// スクレイパがログインに使うため平文へ戻せる必要がある。鍵は CRED_ENC_KEY（64桁hex）か、
-// 無ければ初回起動時に .cred-key へ自動生成して以降使い回す。
-const CRED_KEY = (() => {
-  const env = (process.env.CRED_ENC_KEY || "").trim();
-  if (/^[0-9a-fA-F]{64}$/.test(env)) return Buffer.from(env, "hex");
-  const keyFile = path.join(__dirname, ".cred-key");
-  try {
-    const s = fs.readFileSync(keyFile, "utf8").trim();
-    if (/^[0-9a-fA-F]{64}$/.test(s)) return Buffer.from(s, "hex");
-  } catch (_e) { /* 初回はファイルなし */ }
-  const key = crypto.randomBytes(32);
-  fs.writeFileSync(keyFile, key.toString("hex"), { mode: 0o600 });
-  console.log(`資格情報の暗号鍵を生成しました: ${keyFile}`);
-  return key;
-})();
-
-function encryptCred(plain) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", CRED_KEY, iv);
-  const enc = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
-  return `${iv.toString("hex")}:${cipher.getAuthTag().toString("hex")}:${enc.toString("hex")}`;
-}
-
-function decryptCred(stored) {
-  const [ivHex, tagHex, encHex] = String(stored || "").split(":");
-  if (!ivHex || !tagHex || !encHex) throw new Error("暗号データの形式が不正です");
-  const decipher = crypto.createDecipheriv("aes-256-gcm", CRED_KEY, Buffer.from(ivHex, "hex"));
-  decipher.setAuthTag(Buffer.from(tagHex, "hex"));
-  return Buffer.concat([decipher.update(Buffer.from(encHex, "hex")), decipher.final()]).toString("utf8");
-}
+// Waseda パスワード等の可逆暗号化（AES-256-GCM）は cred.js に切り出した
+// （gemini.js がユーザーごとの API キーを復号するのにも使うため）。
 
 // email + token を accounts.json → DB の順で照合し、アカウント相当を返す（非同期）。
 async function resolveAccount(email, token) {
@@ -217,6 +189,17 @@ function escapeHtml(s) {
 function serverErr(e, context) {
   console.error(context ? `サーバーエラー(${context}):` : "サーバーエラー:", e?.message || e);
   return "サーバー内部でエラーが発生しました";
+}
+
+// 登録後に Gemini API キーが失効した場合（Google 側で削除等）は、汎用エラーではなく
+// 再登録への導線を返す。該当すれば true（レスポンス送信済み）。
+function handleBadGeminiKey(res, e) {
+  if (!String(e?.message || "").includes("API key not valid")) return false;
+  res.status(400).json({
+    ok: false,
+    error: "登録されている Gemini APIキーが無効になっています。「アカウント」タブで登録し直してください",
+  });
+  return true;
 }
 
 // ---- ログイン試行のレート制限（総当たり対策） ----
@@ -428,8 +411,8 @@ app.delete("/api/courses/:id", async (req, res) => {
 app.post("/api/files", heavyLimiter, async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
-  if (!gemini.isConfigured()) {
-    return res.status(503).json({ ok: false, error: "Gemini が未設定です（GEMINI_API_KEY）" });
+  if (!(await gemini.isConfiguredFor(account.email))) {
+    return res.status(503).json({ ok: false, error: gemini.NO_KEY_MESSAGE });
   }
   const rawName = req.get("X-Filename") || `document-${Date.now()}`;
   const name = path.basename(rawName).slice(0, 500);
@@ -439,11 +422,11 @@ app.post("/api/files", heavyLimiter, async (req, res) => {
     if (ctype.startsWith("text/plain")) {
       const text = typeof req.body === "string" ? req.body : "";
       if (!text.trim()) return res.status(400).json({ ok: false, error: "本文が空です" });
-      summary = await gemini.summarizeDocument({ name, mimeType: "text/plain", text });
+      summary = await gemini.summarizeDocument(account.email, { name, mimeType: "text/plain", text });
     } else if (Buffer.isBuffer(req.body) && req.body.length > 0) {
       // PDF はそのまま Gemini に渡す（inlineData）。
       const mimeType = ctype.startsWith("application/pdf") ? "application/pdf" : "application/pdf";
-      summary = await gemini.summarizeDocument({
+      summary = await gemini.summarizeDocument(account.email, {
         name, mimeType, base64: req.body.toString("base64"),
       });
     } else {
@@ -454,6 +437,7 @@ app.post("/api/files", heavyLimiter, async (req, res) => {
     res.json({ ok: true, name, summary });
   } catch (e) {
     console.error("資料要約に失敗:", e.message);
+    if (handleBadGeminiKey(res, e)) return;
     res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
@@ -785,6 +769,66 @@ app.post("/api/stt-quality", async (req, res) => {
   }
   try {
     await db.setSttQuality(account.email, quality);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// ---- ユーザーごとの Gemini API キー ----
+// サーバー共通の GEMINI_API_KEY(.env) は廃止。各ユーザーが Google AI Studio で
+// 発行した自分のキーを登録し、AI機能（チャット/解析/要約）はそのキーで動く。
+// キーは AES-256-GCM で暗号化して users.gemini_api_key_enc に保存し、
+// GET では本体を返さず「登録済みかどうか」と末尾4文字だけ返す。
+
+app.get("/api/gemini-key", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const enc = await db.getGeminiKeyEnc(account.email);
+    let tail = "";
+    if (enc) {
+      try {
+        tail = decryptCred(enc).slice(-4);
+      } catch (_e) { /* 鍵ローテーション直後など。登録済み扱いのまま伏せる */ }
+    }
+    res.json({ ok: true, hasKey: Boolean(enc), tail, model: gemini.MODEL });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+app.post("/api/gemini-key", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const apiKey = String(req.body?.apiKey || "").trim();
+  if (!apiKey || apiKey.length > 200 || /[^\x21-\x7E]/.test(apiKey)) {
+    return res.status(400).json({ ok: false, error: "APIキーの形式が不正です" });
+  }
+  try {
+    // 登録前に Gemini へ疎通確認し、無効なキーは保存しない。
+    const check = await gemini.verifyApiKey(apiKey);
+    if (!check.ok) {
+      return res.status(400).json({ ok: false, error: `APIキーの確認に失敗しました: ${check.error}` });
+    }
+    const n = await db.setGeminiKeyEnc(account.email, encryptCred(apiKey));
+    if (!n) {
+      // accounts.json 由来のアカウントは users 行が無く保存できない。
+      return res.status(400).json({ ok: false, error: "このアカウントにはAPIキーを保存できません（Web登録のアカウントでログインしてください）" });
+    }
+    console.log(`Gemini APIキーを登録: ${account.email}`);
+    res.json({ ok: true, tail: apiKey.slice(-4) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+app.delete("/api/gemini-key", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    await db.setGeminiKeyEnc(account.email, null);
+    console.log(`Gemini APIキーを削除: ${account.email}`);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: serverErr(e) });
@@ -1242,9 +1286,9 @@ app.post("/api/upload", heavyLimiter, async (req, res) => {
   // Gemini で「課題」「予定」「要約」を抽出して保存。失敗してもアップロードは成功扱い。
   let analyzed = false;
   let taskCount = 0;
-  if (gemini.isConfigured() && id != null) {
+  if (id != null && (await gemini.isConfiguredFor(account.email))) {
     try {
-      const result = await gemini.analyze(content);
+      const result = await gemini.analyze(account.email, content);
       await db.saveAnalysis(id, result.kadai, result.yotei, result.summary);
       await db.upsertTasks(account.email, result.tasks, id);
       const updated = await db.applyTaskUpdates(account.email, result.updates);
@@ -1305,8 +1349,8 @@ app.get("/api/transcripts/:id", async (req, res) => {
 app.post("/api/ask", heavyLimiter, async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
-  if (!gemini.isConfigured()) {
-    return res.status(503).json({ ok: false, error: "Gemini が未設定です（GEMINI_API_KEY）" });
+  if (!(await gemini.isConfiguredFor(account.email))) {
+    return res.status(503).json({ ok: false, error: gemini.NO_KEY_MESSAGE });
   }
   const question = String(req.body?.question || "").trim();
   if (!question) return res.status(400).json({ ok: false, error: "質問が空です" });
@@ -1372,7 +1416,7 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
     const dayTranscripts = targetDay ? await db.getTranscriptsForDay(account.email, targetDay) : [];
     // 会話が1問1答で毎回途切れないよう、直近の会話履歴も文脈として渡す。
     const history = await db.listRecentChatMessages(account.email, 20);
-    const result = await gemini.ask(question, {
+    const result = await gemini.ask(account.email, question, {
       tasks, summaries, calendar, courses, documents, snippets, targetDay, dayTranscripts, history,
     });
 
@@ -1427,7 +1471,7 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
     const claimsAdd = /(登録|追加)(し|いたし)ました|入れ(て|と)おきました|入れました/.test(reply);
     if (claimsAdd && !applied.some((x) => x.op === "add_task")) {
       try {
-        const fallback = await gemini.extractTaskRequests(question);
+        const fallback = await gemini.extractTaskRequests(account.email, question);
         for (const t of fallback) {
           await db.addTask(account.email, t);
           applied.push({ op: "add_task", type: t.type, content: t.content, deadline_at: t.deadline_at });
@@ -1451,6 +1495,7 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
     res.json({ ok: true, reply, applied });
   } catch (e) {
     console.error("ask に失敗:", e.message);
+    if (handleBadGeminiKey(res, e)) return;
     res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
@@ -1642,12 +1687,15 @@ app.get("/api/summary/:day", async (req, res) => {
 app.post("/api/summary/:day/generate", heavyLimiter, async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
-  if (!gemini.isConfigured()) return res.status(503).json({ ok: false, error: "Gemini が未設定です" });
+  if (!(await gemini.isConfiguredFor(account.email))) {
+    return res.status(503).json({ ok: false, error: gemini.NO_KEY_MESSAGE });
+  }
   const day = req.params.day === "today" ? gemini.localDate() : req.params.day;
   try {
     const summary = await reminders.generateDailySummary(account.email, day);
     res.json({ ok: true, day, summary, empty: !summary });
   } catch (e) {
+    if (handleBadGeminiKey(res, e)) return;
     res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
@@ -1829,8 +1877,8 @@ function nextSummarySendAt() {
 }
 
 // 毎日 SUMMARY_TIME の少し前に、LINE 送信や画面表示に備えて「今日の要約」を作り直す。
+// （Gemini キーはユーザーごとの登録制。未登録ユーザーは生成側でスキップされる）
 function scheduleDailySummaryPregeneration() {
-  if (!gemini.isConfigured()) return;
   if (!parseHHMM(SUMMARY_TIME)) {
     console.error(`DAILY_SUMMARY_TIME の形式が不正です: ${SUMMARY_TIME}（HH:MM で指定）`);
     return;
@@ -2146,6 +2194,19 @@ function renderDashboard() {
       <section class="card panel" data-panel="account">
         <h2>アカウント</h2>
         <p>ログイン中: <strong id="accEmail"></strong></p>
+        <hr>
+        <h3 style="font-size:.95rem; margin:.2rem 0 .6rem">Gemini API キー（AI機能に必須）</h3>
+        <p class="muted" style="margin:.2rem 0 .5rem">
+          AIチャット・課題/予定の抽出・要約には、あなた自身の Gemini API キーが必要です。
+          <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>
+          で無料発行し、ここに登録してください。キーは暗号化して保存され、あなたのAI処理にのみ使われます。
+        </p>
+        <input id="geminiKey" type="password" placeholder="AIza..." autocomplete="off">
+        <div class="row" style="margin-top:.6rem">
+          <button onclick="saveGeminiKey()">登録する</button>
+          <button class="ghost" onclick="deleteGeminiKey()">削除</button>
+          <span id="geminiKeyState" class="muted"></span>
+        </div>
         <hr>
         <h3 style="font-size:.95rem; margin:.2rem 0 .6rem">パスワード変更</h3>
         <input id="curpw" type="password" placeholder="現在のパスワード" autocomplete="current-password" style="margin-bottom:.5rem">
@@ -2494,6 +2555,7 @@ function renderDashboard() {
     }
     function showTab(name){
       activeTab = name;
+      localStorage.setItem('mb_tab', name);
       document.querySelectorAll('.tab').forEach(b=>b.classList.toggle('active', b.dataset.tab===name));
       document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
       refreshCurrentTab(true);
@@ -2503,7 +2565,8 @@ function renderDashboard() {
       $('login').style.display = 'none';
       $('app').style.display = '';
       $('accEmail').textContent = auth.email || '';
-      showTab('chat');
+      const savedTab = localStorage.getItem('mb_tab');
+      showTab(document.querySelector('.tab[data-tab="'+savedTab+'"]') ? savedTab : 'chat');
       loadAll();
       startAutoRefresh();
       // Google OAuth から戻ってきた直後は、アカウントタブを開いて結果を表示する。
@@ -2532,7 +2595,7 @@ function renderDashboard() {
       if(j.ok){ $('pwState').textContent='✓ 変更しました'; $('curpw').value=$('newpw').value=''; }
       else $('pwState').textContent = '✗ ' + (j.error||'変更失敗');
     }
-    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioWorkers(); loadAudioJobs(); loadTranscripts(); loadGoogle(); loadChatHistory(); }
+    function loadAll(){ loadTasks(); loadSummary(); loadMoodle(); loadWaseda(); loadDocs(); loadAudioWorkers(); loadAudioJobs(); loadTranscripts(); loadGoogle(); loadChatHistory(); loadGeminiKey(); }
 
     // ---- Google カレンダー連携（Web OAuth） ----
     let googleAccounts = [];
@@ -2914,6 +2977,37 @@ function renderDashboard() {
       } catch(e){ $('docState').textContent='✗ 通信エラー'; }
     }
 
+    // ---- Gemini API キー（ユーザーごとの登録制） ----
+    async function loadGeminiKey(){
+      if(!auth.email) return;
+      try {
+        const r = await fetch('/api/gemini-key',{headers:headers()});
+        const j = await r.json();
+        if(!j.ok) return;
+        $('geminiKeyState').textContent = j.hasKey
+          ? '登録済み'+(j.tail ? '（****'+j.tail+'）' : '')+' / モデル: '+j.model
+          : '未登録（AI機能を使うには登録が必要です）';
+      } catch(e){}
+    }
+    async function saveGeminiKey(){
+      const apiKey = $('geminiKey').value.trim();
+      if(!apiKey){ $('geminiKeyState').textContent = '✗ APIキーを入力してください'; return; }
+      $('geminiKeyState').textContent = '確認中…';
+      try {
+        const r = await fetch('/api/gemini-key',{method:'POST',headers:headers(),body:JSON.stringify({apiKey})});
+        const j = await r.json();
+        if(j.ok){ $('geminiKey').value=''; $('geminiKeyState').textContent = '✓ 登録しました（****'+j.tail+'）'; }
+        else $('geminiKeyState').textContent = '✗ '+(j.error||'登録失敗');
+      } catch(e){ $('geminiKeyState').textContent = '✗ 通信エラー'; }
+    }
+    async function deleteGeminiKey(){
+      if(!confirm('登録済みの Gemini API キーを削除しますか？AI機能が使えなくなります。')) return;
+      const r = await fetch('/api/gemini-key',{method:'DELETE',headers:headers()});
+      const j = await r.json();
+      if(j.ok){ $('geminiKeyState').textContent = '削除しました'; loadGeminiKey(); }
+      else $('geminiKeyState').textContent = '✗ '+(j.error||'削除失敗');
+    }
+
     // ---- Moodle 連携 ----
     async function loadMoodle(){
       if(!auth.email) return;
@@ -3213,10 +3307,8 @@ async function main() {
     console.log(`AIHelper listening on http://localhost:${PORT}`);
     console.log(`accounts: ${ACCOUNTS_FILE}`);
     console.log(`DB: ${process.env.DB_NAME || "aihelper"}@${process.env.DB_HOST || "localhost"}`);
-    console.log(`Gemini: ${gemini.isConfigured() ? gemini.MODEL : "未設定"} / LINE: ${line.isConfigured() ? "有効" : "未設定"}`);
-    if (gemini.isConfigured()) {
-      scheduleDailySummaryPregeneration();
-    }
+    console.log(`Gemini: ユーザーごとのAPIキー登録制 (モデル ${gemini.MODEL}) / LINE: ${line.isConfigured() ? "有効" : "未設定"}`);
+    scheduleDailySummaryPregeneration();
     if (line.isConfigured()) {
       scheduleDailySummary();
     } else {

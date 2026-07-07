@@ -26,7 +26,7 @@ make run           # http://localhost:3000
 
 # パスワード等は変数で上書き可
 make install DB_PASSWORD=好きなパスワード
-make run GEMINI_API_KEY=xxx LINE_CHANNEL_ACCESS_TOKEN=yyy
+make run LINE_CHANNEL_ACCESS_TOKEN=yyy
 ```
 
 `make install` は Node が接続する専用ユーザー（既定 `aihelper`/`aihelper`）を作成し、
@@ -55,8 +55,7 @@ npm start          # http://localhost:3000
 | `DB_PASSWORD` | （空） | パスワード |
 | `DB_NAME` | `AIHelper` | データベース名 |
 | `PORT` | `3000` | サーバーの待受ポート |
-| `GEMINI_API_KEY` | （空） | Gemini の API キー。未設定なら抽出・要約・AIチャットは無効 |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | 使用する Gemini モデル |
+| `GEMINI_MODEL` | `gemini-2.5-flash` | 使用する Gemini モデル（サーバー共通） |
 | `LINE_CHANNEL_ACCESS_TOKEN` | （空） | LINE Messaging API のチャネルアクセストークン。未設定なら LINE 送信はスキップ |
 | `REMINDER_INTERVAL_SEC` | `60` | 締切チェックの間隔（秒） |
 | `DAILY_SUMMARY_INTERVAL_MIN` | `300` | 「今日の要約」自動再生成の間隔（分）。`0` で無効 |
@@ -96,10 +95,19 @@ Web の Google 連携を有効にするには、Google Cloud Console で「OAuth
 ```bash
 # フル機能で起動する例
 DB_USER=root DB_PASSWORD=secret \
-GEMINI_API_KEY=xxxxxxxx \
 LINE_CHANNEL_ACCESS_TOKEN=yyyyyyyy \
 npm start
 ```
+
+### Gemini API キー（ユーザーごとの登録制）
+
+抽出・要約・AIチャットに使う Gemini API キーは、サーバー共通の環境変数ではなく
+**各ユーザーが自分で登録する**。[Google AI Studio](https://aistudio.google.com/apikey) で発行し、
+ダッシュボードの「アカウント」タブから登録する（登録時に疎通確認あり）。
+キーは AES-256-GCM で暗号化して `users.gemini_api_key_enc` に保存され、鍵ローテーションは
+`rotate-cred-key.js` が Waseda パスワード・Google refresh_token と一緒に面倒を見る。
+キー未登録のユーザーは AI 機能（チャット・課題/予定抽出・要約・資料要約）が使えず、
+音声の文字起こし自体はキー無しでも動く（解析だけスキップされる）。
 
 テーブルは起動時に `CREATE TABLE IF NOT EXISTS` で自動作成（DB 自体は事前に作成が必要）。
 既存 DB に対しても不足カラムは自動で追加される。

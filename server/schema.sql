@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS users (
   waseda_password_enc VARCHAR(1024) NULL,
   -- 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
   stt_quality   VARCHAR(16)  NOT NULL DEFAULT 'high',
+  -- ユーザー自身が登録する Gemini API キー（AES-256-GCM 暗号化。iv:tag:cipher の hex）。
+  -- サーバー共通の GEMINI_API_KEY(.env) は廃止し、AI機能はこのキーで動く。
+  gemini_api_key_enc VARCHAR(1024) NULL,
   created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uq_users_email (email),
   KEY idx_users_token (token)
