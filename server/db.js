@@ -185,6 +185,28 @@ async function ensureSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
 
+  // ワーカーPCの公開範囲。private=クライアントでログインしたアカウントのジョブのみ、
+  // global=このサービスの全ユーザーのジョブを処理できる。クライアントUIで選択し
+  // X-Worker-Mode ヘッダーで申告される（旧クライアントは送らないので private のまま）。
+  await addColumnIfMissing("audio_workers", "mode", "VARCHAR(16) NOT NULL DEFAULT 'private'");
+  // クライアントが3秒ごとに送ってくるリソース使用率（PC選択画面の表示用）。
+  await addColumnIfMissing("audio_workers", "cpu_pct", "FLOAT NULL");
+  await addColumnIfMissing("audio_workers", "mem_pct", "FLOAT NULL");
+  await addColumnIfMissing("audio_workers", "gpu_pct", "FLOAT NULL");
+  await addColumnIfMissing("audio_workers", "metrics_at", "DATETIME NULL");
+
+  // globalワーカーに対する各ユーザーの利用可否。行が無ければ「利用する」扱い。
+  // （audio_workers.allowed は所有者自身の設定なので、他ユーザー分はここで持つ）
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audio_worker_prefs (
+      email      VARCHAR(255) NOT NULL,
+      worker_id  INT          NOT NULL,
+      allowed    TINYINT(1)   NOT NULL DEFAULT 1,
+      updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (email, worker_id)
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
+
   // Moodle カレンダーの iCal 書き出し URL（ユーザーごと）。
   await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
   // 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
@@ -642,56 +664,104 @@ async function markNotified(id, flagColumn) {
 // 新クライアントはサーバーが割り振ったIDを X-Worker-Id で送り返してくるので
 // それを最優先し、IDを送らない旧クライアントは接続元IP＋アカウントで
 // 同一PCとみなす。初回登録時は allowed=1（処理を許可）で作る。
-async function resolveAudioWorker(email, { id = null, ip = null, name = null } = {}) {
+async function resolveAudioWorker(email, { id = null, ip = null, name = null, mode = null } = {}) {
   const better = String(name || "").trim().slice(0, 255);
+  // mode はクライアントが X-Worker-Mode で申告したときだけ更新する
+  // （旧クライアントはヘッダーを送らないため既存値を維持）。
+  const newMode = mode === "global" || mode === "private" ? mode : null;
   if (id) {
     const [rows] = await pool.query(
-      `SELECT id, email, ip, name, allowed FROM audio_workers WHERE id = ? AND email = ? LIMIT 1`,
+      `SELECT id, email, ip, name, allowed, mode FROM audio_workers WHERE id = ? AND email = ? LIMIT 1`,
       [Number(id), email]
     );
     if (rows[0]) {
       // 自動命名（PC (ip)）のままなら、クライアントが名乗ったホスト名に置き換える。
       const rename = better && /^PC \(/.test(rows[0].name) ? better : null;
       await pool.query(
-        `UPDATE audio_workers SET ip = ?, name = COALESCE(?, name), last_seen_at = NOW() WHERE id = ?`,
-        [ip, rename, rows[0].id]
+        `UPDATE audio_workers SET ip = ?, name = COALESCE(?, name), mode = COALESCE(?, mode), last_seen_at = NOW() WHERE id = ?`,
+        [ip, rename, newMode, rows[0].id]
       );
       if (rename) rows[0].name = rename;
       if (ip) rows[0].ip = ip;
+      if (newMode) rows[0].mode = newMode;
       return rows[0];
     }
   }
   if (ip) {
     const [rows] = await pool.query(
-      `SELECT id, email, ip, name, allowed FROM audio_workers
+      `SELECT id, email, ip, name, allowed, mode FROM audio_workers
        WHERE email = ? AND ip = ? ORDER BY id ASC LIMIT 1`,
       [email, ip]
     );
     if (rows[0]) {
       const rename = better && /^PC \(/.test(rows[0].name) ? better : null;
       await pool.query(
-        `UPDATE audio_workers SET name = COALESCE(?, name), last_seen_at = NOW() WHERE id = ?`,
-        [rename, rows[0].id]
+        `UPDATE audio_workers SET name = COALESCE(?, name), mode = COALESCE(?, mode), last_seen_at = NOW() WHERE id = ?`,
+        [rename, newMode, rows[0].id]
       );
       if (rename) rows[0].name = rename;
+      if (newMode) rows[0].mode = newMode;
       return rows[0];
     }
   }
   const label = better || (ip ? `PC (${ip})` : "PC");
   const [r] = await pool.query(
-    `INSERT INTO audio_workers (email, ip, name) VALUES (?, ?, ?)`,
-    [email, ip, label]
+    `INSERT INTO audio_workers (email, ip, name, mode) VALUES (?, ?, ?, ?)`,
+    [email, ip, label, newMode || "private"]
   );
-  return { id: r.insertId, email, ip, name: label, allowed: 1 };
+  return { id: r.insertId, email, ip, name: label, allowed: 1, mode: newMode || "private" };
 }
 
+// 自分のPCに加え、他ユーザーが global として公開しているPC（所有者が稼働許可
+// しているものだけ）も返す。global PC の利用可否は audio_worker_prefs から
+// 引いた pref_allowed（行が無ければ許可扱い）。
 async function listAudioWorkers(email) {
   const [rows] = await pool.query(
-    `SELECT id, ip, name, allowed, created_at, last_seen_at
-     FROM audio_workers WHERE email = ? ORDER BY id ASC`,
-    [email]
+    `SELECT w.id, w.ip, w.name, w.allowed, w.mode,
+            w.cpu_pct, w.mem_pct, w.gpu_pct, w.metrics_at,
+            w.created_at, w.last_seen_at,
+            (w.email = ?) AS owned,
+            p.allowed AS pref_allowed
+     FROM audio_workers w
+     LEFT JOIN audio_worker_prefs p ON p.worker_id = w.id AND p.email = ?
+     WHERE w.email = ? OR (w.mode = 'global' AND w.allowed = 1)
+     ORDER BY (w.email = ?) DESC, w.id ASC`,
+    [email, email, email, email]
   );
   return rows;
+}
+
+async function getAudioWorker(id) {
+  const [rows] = await pool.query(
+    `SELECT id, email, ip, name, allowed, mode FROM audio_workers WHERE id = ? LIMIT 1`,
+    [Number(id)]
+  );
+  return rows[0] || null;
+}
+
+// 他ユーザーの global ワーカーに自分のジョブを任せるかどうかの設定。
+async function setAudioWorkerPref(email, workerId, allowed) {
+  const [rows] = await pool.query(
+    `SELECT id FROM audio_workers WHERE id = ? AND mode = 'global' LIMIT 1`,
+    [Number(workerId)]
+  );
+  if (!rows[0]) return 0;
+  await pool.query(
+    `INSERT INTO audio_worker_prefs (email, worker_id, allowed) VALUES (?, ?, ?)
+     ON DUPLICATE KEY UPDATE allowed = VALUES(allowed)`,
+    [email, Number(workerId), allowed ? 1 : 0]
+  );
+  return 1;
+}
+
+// クライアントが3秒ごとに送ってくるリソース使用率を記録する。
+async function updateAudioWorkerMetrics(id, { cpu = null, mem = null, gpu = null } = {}) {
+  await pool.query(
+    `UPDATE audio_workers
+     SET cpu_pct = ?, mem_pct = ?, gpu_pct = ?, metrics_at = NOW(), last_seen_at = NOW()
+     WHERE id = ?`,
+    [cpu, mem, gpu, Number(id)]
+  );
 }
 
 async function updateAudioWorker(email, id, { allowed = null, name = null } = {}) {
@@ -739,7 +809,9 @@ async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
 // UPDATE ... ORDER BY ... LIMIT 1 の1文で確保するため、複数のワーカーPCが
 // 同時にポーリングしても同じジョブを二重取得せず、それぞれ別のジョブが渡る。
 // email を渡すと、そのユーザー本人のジョブだけを外部ワーカーへ渡す。
-async function claimNextAudioJob(email = null, workerId = null) {
+// global ワーカー（email = null）の場合は respectPrefs を立てて、そのPCの利用を
+// 断っているユーザー（audio_worker_prefs.allowed = 0）のジョブを除外する。
+async function claimNextAudioJob(email = null, workerId = null, { respectPrefs = false } = {}) {
   // LAST_INSERT_ID(expr) は接続ごとの値なので、UPDATE と SELECT を同一接続で行う。
   const conn = await pool.getConnection();
   try {
@@ -748,6 +820,13 @@ async function claimNextAudioJob(email = null, workerId = null) {
     if (email) {
       where.push("email = ?");
       args.push(email);
+    }
+    if (respectPrefs && workerId) {
+      where.push(`NOT EXISTS (
+        SELECT 1 FROM audio_worker_prefs p
+        WHERE p.worker_id = ? AND p.email = audio_jobs.email AND p.allowed = 0
+      )`);
+      args.push(workerId);
     }
     const [r] = await conn.query(
       `UPDATE audio_jobs
@@ -771,16 +850,27 @@ async function getClaimedAudioJob(email, id, workerId = null) {
   const [rows] = await pool.query(
     `SELECT id, email, filename, stored_path, mime, size_bytes, status, claimed_by
      FROM audio_jobs
-     WHERE id = ? AND email = ? AND status = 'processing'
+     WHERE id = ? AND status = 'processing'
      LIMIT 1`,
-    [id, email]
+    [id]
   );
   const job = rows[0];
   if (!job) return null;
-  // 再キュー後に別ワーカーが確保し直したジョブへ、元のワーカーが結果を
-  // 送って二重保存になるのを防ぐ。ワーカーIDを送らない旧クライアントと
-  // claimed_by が無い既存ジョブは従来通り許可する。
-  if (workerId && job.claimed_by && Number(job.claimed_by) !== Number(workerId)) return null;
+  if (job.email === email) {
+    // 再キュー後に別ワーカーが確保し直したジョブへ、元のワーカーが結果を
+    // 送って二重保存になるのを防ぐ。ワーカーIDを送らない旧クライアントと
+    // claimed_by が無い既存ジョブは従来通り許可する。
+    if (workerId && job.claimed_by && Number(job.claimed_by) !== Number(workerId)) return null;
+    return job;
+  }
+  // 他ユーザーのジョブ: 認証アカウント所有の global ワーカーが自分で claim した
+  // ジョブに限って許可する（ワーカーIDを送らない旧クライアントは常に不可）。
+  if (!workerId || Number(job.claimed_by) !== Number(workerId)) return null;
+  const [w] = await pool.query(
+    `SELECT id FROM audio_workers WHERE id = ? AND email = ? AND mode = 'global' LIMIT 1`,
+    [Number(workerId), email]
+  );
+  if (!w[0]) return null;
   return job;
 }
 
@@ -796,7 +886,7 @@ async function listAudioJobs(email, limit = 30) {
     `SELECT j.id, j.filename, j.size_bytes, j.status, j.error, j.transcript_id,
             j.created_at, j.updated_at, j.claimed_by, w.name AS worker_name
      FROM audio_jobs j
-     LEFT JOIN audio_workers w ON w.id = j.claimed_by AND w.email = j.email
+     LEFT JOIN audio_workers w ON w.id = j.claimed_by
      WHERE j.email = ? ORDER BY j.id DESC LIMIT ?`,
     [email, limit]
   );
@@ -1190,6 +1280,9 @@ module.exports = {
   // audio jobs
   resolveAudioWorker,
   listAudioWorkers,
+  getAudioWorker,
+  setAudioWorkerPref,
+  updateAudioWorkerMetrics,
   updateAudioWorker,
   deleteAudioWorker,
   createAudioJob,

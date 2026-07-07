@@ -1008,6 +1008,13 @@ function workerNameFromReq(req) {
   return raw ? raw.slice(0, 100) : null;
 }
 
+// 新クライアントが申告する公開範囲（global/private）。クライアントUIで選択される。
+// 旧クライアントはヘッダーを送らないので null（サーバー側の既存値を維持）。
+function workerModeFromReq(req) {
+  const raw = String(req.get("x-worker-mode") || "").trim().toLowerCase();
+  return raw === "global" || raw === "private" ? raw : null;
+}
+
 function clientIpOf(req) {
   const ip = String(req.ip || req.socket?.remoteAddress || "").trim().slice(0, 64);
   return ip || null;
@@ -1022,32 +1029,55 @@ app.get("/api/audio/workers", async (req, res) => {
     const workers = await db.listAudioWorkers(account.email);
     res.json({
       ok: true,
-      workers: workers.map((w) => ({
-        id: w.id,
-        name: w.name,
-        ip: w.ip,
-        allowed: Boolean(w.allowed),
-        lastSeenAt: w.last_seen_at,
-        // ポーリング間隔(既定10秒)より十分長い60秒以内に接続があれば「接続中」。
-        online: Boolean(w.last_seen_at) && Date.now() - new Date(w.last_seen_at).getTime() < 60_000,
-      })),
+      workers: workers.map((w) => {
+        const owned = Boolean(w.owned);
+        return {
+          id: w.id,
+          name: w.name,
+          // 他ユーザーのglobal PCの接続元IPは晒さない。
+          ip: owned ? w.ip : null,
+          owned,
+          mode: w.mode || "private",
+          // 自分のPCは所有者設定(allowed)、他ユーザーのglobal PCは自分のprefs
+          // （未設定なら利用する扱い）。
+          allowed: owned ? Boolean(w.allowed) : w.pref_allowed === null || Boolean(w.pref_allowed),
+          lastSeenAt: w.last_seen_at,
+          // クライアントの3秒間隔メトリクス送信があるため60秒以内なら「接続中」。
+          online: Boolean(w.last_seen_at) && Date.now() - new Date(w.last_seen_at).getTime() < 60_000,
+          // クライアントから3秒ごとに届くリソース使用率。古い値は表示しない。
+          cpuPct: w.metrics_at ? w.cpu_pct : null,
+          memPct: w.metrics_at ? w.mem_pct : null,
+          gpuPct: w.metrics_at ? w.gpu_pct : null,
+          metricsAt: w.metrics_at,
+          metricsFresh: Boolean(w.metrics_at) && Date.now() - new Date(w.metrics_at).getTime() < 15_000,
+        };
+      }),
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
 
-// クライアントPCの設定変更（処理の許可/停止・表示名）。
+// クライアントPCの設定変更。自分のPCは処理の許可/停止・表示名を変更できる。
+// 他ユーザーのglobal PCは「自分のジョブを任せるかどうか（allowed）」だけ変更できる。
 app.post("/api/audio/workers/:id", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ ok: false, error: "IDが不正です" });
+  const allowed = typeof req.body?.allowed === "boolean" ? req.body.allowed : null;
+  const name = typeof req.body?.name === "string" ? req.body.name : null;
   try {
-    const n = await db.updateAudioWorker(account.email, id, {
-      allowed: typeof req.body?.allowed === "boolean" ? req.body.allowed : null,
-      name: typeof req.body?.name === "string" ? req.body.name : null,
-    });
+    const worker = await db.getAudioWorker(id);
+    if (!worker) return res.status(404).json({ ok: false, error: "クライアントが見つかりません" });
+    if (worker.email === account.email) {
+      await db.updateAudioWorker(account.email, id, { allowed, name });
+      return res.json({ ok: true });
+    }
+    if (worker.mode !== "global" || allowed === null) {
+      return res.status(404).json({ ok: false, error: "クライアントが見つかりません" });
+    }
+    const n = await db.setAudioWorkerPref(account.email, id, allowed);
     if (!n) return res.status(404).json({ ok: false, error: "クライアントが見つかりません" });
     res.json({ ok: true });
   } catch (e) {
@@ -1083,10 +1113,19 @@ app.post("/api/audio/worker/claim", async (req, res) => {
       id: workerIdFromReq(req),
       ip: clientIpOf(req),
       name: workerNameFromReq(req),
+      mode: workerModeFromReq(req),
     });
-    const base = { ok: true, workerId: worker.id, workerName: worker.name, allowed: Boolean(worker.allowed) };
+    const base = {
+      ok: true,
+      workerId: worker.id,
+      workerName: worker.name,
+      mode: worker.mode || "private",
+      allowed: Boolean(worker.allowed),
+    };
     if (!worker.allowed) return res.json({ ...base, job: null });
-    const job = await audio.claimRemoteJob(account.email, worker.id);
+    // global モードのPCは全ユーザーのジョブを処理対象にする（そのPCの利用を
+    // 断っているユーザーのジョブは claim 時に除外される）。
+    const job = await audio.claimRemoteJob(account.email, worker.id, { global: worker.mode === "global" });
     if (!job) return res.json({ ...base, job: null });
     res.json({
       ...base,
@@ -1098,6 +1137,35 @@ app.post("/api/audio/worker/claim", async (req, res) => {
     });
   } catch (e) {
     console.error("外部音声ワーカーのジョブ確保に失敗:", e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// 外部PCワーカー用: リソース使用率（CPU/メモリ/GPU）の報告。クライアントが
+// 3秒ごとに送ってくる。ダッシュボードの「処理に使うPC」選択画面に表示する。
+// レスポンスで割り振り済みIDを知らせるので、初回接続でもPC登録が完了する。
+app.post("/api/audio/worker/metrics", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const pct = (v) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? Math.min(Math.max(n, 0), 100) : null;
+  };
+  try {
+    const worker = await db.resolveAudioWorker(account.email, {
+      id: workerIdFromReq(req),
+      ip: clientIpOf(req),
+      name: workerNameFromReq(req),
+      mode: workerModeFromReq(req),
+    });
+    await db.updateAudioWorkerMetrics(worker.id, {
+      cpu: pct(req.body?.cpu),
+      mem: pct(req.body?.mem),
+      gpu: pct(req.body?.gpu),
+    });
+    res.json({ ok: true, workerId: worker.id, workerName: worker.name, mode: worker.mode || "private" });
+  } catch (e) {
+    console.error("外部音声ワーカーのメトリクス保存に失敗:", e.message);
     res.status(500).json({ ok: false, error: serverErr(e) });
   }
 });
@@ -2061,6 +2129,8 @@ function renderDashboard() {
         <p class="muted" style="margin:.2rem 0 .5rem">
           音声を処理させるPCを選べます（複数選択可）。チェックを外したPCには新しいジョブを割り振りません。
           PCで audio-worker を起動して最初に接続した時に、サーバーがIDを自動で割り振ってここに表示します。
+          種別が global のPCは提供者以外のユーザーの音声も処理します（他ユーザー提供のglobal PCに任せたくない場合はチェックを外してください）。
+          CPU/メモリ/GPU はクライアントから3秒ごとに届く使用率です。
         </p>
         <div id="audioWorkers" style="margin-bottom:.8rem"><p class="muted">読み込み中…</p></div>
         <h3 style="font-size:.95rem; margin:.6rem 0 .4rem">ジョブ一覧</h3>
@@ -2167,6 +2237,7 @@ function renderDashboard() {
     let activeTab = 'chat';
     let autoRefreshTimer = null;
     let audioJobsTimer = null;
+    let audioWorkersTimer = null;
     let autoRefreshBusy = false;
     let lastGoogleRefresh = 0;
     function activeControl(){
@@ -2183,6 +2254,8 @@ function renderDashboard() {
       autoRefreshTimer = null;
       if(audioJobsTimer) clearTimeout(audioJobsTimer);
       audioJobsTimer = null;
+      if(audioWorkersTimer) clearTimeout(audioWorkersTimer);
+      audioWorkersTimer = null;
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     }
     function refreshWhenVisible(){
@@ -2548,8 +2621,20 @@ function renderDashboard() {
     }
 
     // ---- 音声ワーカーPC（クライアント）選択 ----
+    // クライアントは3秒ごとに使用率を送ってくるので、filesタブ表示中は
+    // こちらも3秒ごとに再取得して最新の値を見せる。
+    function meterCell(pct, fresh){
+      if(pct===null || pct===undefined || !fresh) return '<span class="muted">—</span>';
+      const v = Math.round(Number(pct));
+      const color = v>=90 ? '#b42318' : v>=70 ? '#b7791f' : '#117a37';
+      return '<div style="min-width:70px"><span style="font-variant-numeric:tabular-nums">'+v+'%</span>'+
+        '<div style="height:4px;border-radius:2px;background:#e5eaf1;margin-top:2px">'+
+        '<div style="height:4px;border-radius:2px;width:'+Math.min(v,100)+'%;background:'+color+'"></div></div></div>';
+    }
     async function loadAudioWorkers(){
       if(!auth.email) return;
+      if(audioWorkersTimer) clearTimeout(audioWorkersTimer);
+      audioWorkersTimer = null;
       try {
         const r = await fetch('/api/audio/workers',{headers:headers()});
         const j = await r.json();
@@ -2562,18 +2647,31 @@ function renderDashboard() {
           '<tr><td><label style="display:flex;align-items:center;gap:.4rem;margin:0;cursor:pointer">'+
             '<input type="checkbox" '+(w.allowed?'checked':'')+' onchange="setWorkerAllowed('+w.id+',this.checked)">'+
             '#'+w.id+'</label></td>'+
-          '<td>'+escapeHtml(w.name)+'</td>'+
-          '<td>'+escapeHtml(w.ip||'')+'</td>'+
+          '<td>'+escapeHtml(w.name)+
+            (w.owned && w.ip ? '<div class="muted" style="font-size:.8rem">'+escapeHtml(w.ip)+'</div>' : '')+'</td>'+
+          '<td>'+(w.mode==='global'
+            ? '<span style="color:#1f6feb">global</span>'+(w.owned?'':'<div class="muted" style="font-size:.8rem">他ユーザー提供</div>')
+            : '<span class="muted">private</span>')+'</td>'+
+          '<td>'+meterCell(w.cpuPct, w.metricsFresh)+'</td>'+
+          '<td>'+meterCell(w.memPct, w.metricsFresh)+'</td>'+
+          '<td>'+meterCell(w.gpuPct, w.metricsFresh)+'</td>'+
           '<td>'+(w.online
             ? '<span style="color:#117a37">接続中</span>'
             : '<span class="muted">'+(w.lastSeenAt ? new Date(w.lastSeenAt).toLocaleString('ja-JP') : '未接続')+'</span>')+'</td>'+
-          '<td><span class="row" style="gap:.3rem">'+
-            '<button class="ghost small" onclick="renameWorker('+w.id+')">名前変更</button>'+
-            '<button class="ghost small" onclick="deleteWorker('+w.id+')">削除</button>'+
-          '</span></td></tr>').join('');
+          '<td>'+(w.owned
+            ? '<span class="row" style="gap:.3rem">'+
+              '<button class="ghost small" onclick="renameWorker('+w.id+')">名前変更</button>'+
+              '<button class="ghost small" onclick="deleteWorker('+w.id+')">削除</button>'+
+            '</span>'
+            : '')+'</td></tr>').join('');
         $('audioWorkers').innerHTML =
-          '<table><thead><tr><th>処理する</th><th>名前</th><th>接続元IP</th><th>最終接続</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>';
+          '<table><thead><tr><th>処理する</th><th>名前</th><th>種別</th><th>CPU</th><th>メモリ</th><th>GPU</th><th>最終接続</th><th></th></tr></thead><tbody>'+rows+'</tbody></table>';
       } catch(e){}
+      finally {
+        if(activeTab==='files' && !document.hidden){
+          audioWorkersTimer = setTimeout(loadAudioWorkers, 3000);
+        }
+      }
     }
     async function setWorkerAllowed(id, allowed){
       try {

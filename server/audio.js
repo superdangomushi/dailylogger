@@ -77,14 +77,17 @@ async function finishJobWithText(job, text) {
   return { empty: false, transcriptId, filename: txtName, chars: body.length };
 }
 
-// ローカルPCの外部ワーカー用: ログインユーザー本人の queued ジョブを1件だけ確保する。
+// ローカルPCの外部ワーカー用: queued ジョブを1件だけ確保する。
 // workerId はサーバーが audio_workers で割り振ったワーカーPCのID。複数PCが同時に
 // ポーリングしても claim は1件ずつ原子的に確保されるため、手が空いたPCから順に
 // 別々のジョブが割り振られる。
-async function claimRemoteJob(email, workerId = null) {
-  const job = await db.claimNextAudioJob(email, workerId);
+// private（既定）はログインユーザー本人のジョブのみ。global は全ユーザーのジョブを
+// 対象にするが、そのPCの利用を断っているユーザーのジョブは除外する。
+async function claimRemoteJob(email, workerId = null, { global = false } = {}) {
+  const job = await db.claimNextAudioJob(global ? null : email, workerId, { respectPrefs: global });
   if (!job) return null;
-  const quality = await db.getSttQuality(email).catch(() => "high");
+  // 音声認識クオリティはジョブ所有者の設定に従う（globalでは処理PCの持ち主と異なる）。
+  const quality = await db.getSttQuality(job.email).catch(() => "high");
   return {
     id: job.id,
     filename: job.filename,

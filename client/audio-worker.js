@@ -8,6 +8,7 @@
 // トークンを取得してローカル設定に保存し、以後は各アカウントのジョブを
 // 10秒ごとに順番にポーリングする。パスワードは保存しない。
 
+const { execFile } = require("child_process");
 const fs = require("fs");
 const http = require("http");
 const os = require("os");
@@ -20,6 +21,7 @@ const DEFAULT_BASE_URL = String(process.env.AIHELPER_SERVER_URL || process.env.S
   .replace(/\/+$/, "");
 const CONFIG_PATH = process.env.AUDIO_WORKER_CONFIG || path.join(__dirname, "accounts.json");
 const POLL_INTERVAL_MS = Math.max(Number(process.env.AUDIO_WORKER_POLL_SEC || 10), 1) * 1000;
+const METRICS_INTERVAL_MS = Math.max(Number(process.env.AUDIO_WORKER_METRICS_SEC || 3), 1) * 1000;
 const UI_HOST = process.env.AUDIO_WORKER_UI_HOST || "127.0.0.1";
 const UI_PORT = Number(process.env.AUDIO_WORKER_UI_PORT || 39123);
 const WORK_DIR = process.env.AUDIO_WORKER_DIR || path.join(__dirname, "worker-audio");
@@ -57,6 +59,8 @@ function loadConfig() {
   const accounts = Array.isArray(loaded?.accounts) ? loaded.accounts : [];
   const cfg = {
     baseUrl: cleanBaseUrl(loaded?.baseUrl || DEFAULT_BASE_URL),
+    // このPCの公開範囲。private=登録したアカウントの音声のみ、global=全ユーザーの音声を処理。
+    mode: normalizeMode(loaded?.mode),
     accounts: accounts
       .map(normalizeAccount)
       .filter((a) => a.email && a.token),
@@ -75,6 +79,10 @@ function loadConfig() {
     });
   }
   return cfg;
+}
+
+function normalizeMode(value) {
+  return String(value || "").trim().toLowerCase() === "global" ? "global" : "private";
 }
 
 function normalizeAccount(raw) {
@@ -96,6 +104,7 @@ function normalizeAccount(raw) {
 function saveConfig() {
   const stored = {
     baseUrl: cleanBaseUrl(config.baseUrl),
+    mode: normalizeMode(config.mode),
     accounts: config.accounts
       .filter((a) => a.source !== "env")
       .map((a) => ({
@@ -139,8 +148,11 @@ function publicState() {
   return {
     ok: true,
     baseUrl: config.baseUrl,
+    mode: normalizeMode(config.mode),
+    metrics: latestMetrics,
     hostname: HOST_LABEL,
     pollSec: POLL_INTERVAL_MS / 1000,
+    metricsSec: METRICS_INTERVAL_MS / 1000,
     ui: `http://${UI_HOST}:${UI_PORT}`,
     configPath: CONFIG_PATH,
     accounts: config.accounts.map((a) => ({
@@ -172,7 +184,97 @@ function authHeaders(account, extra = {}) {
   if (HOST_LABEL) headers["X-Worker-Name"] = HOST_LABEL;
   // サーバーが割り振ったIDが分かっていれば送り返す（IPが変わっても同一PC扱いになる）。
   if (account.workerId) headers["X-Worker-Id"] = String(account.workerId);
+  // このPCの公開範囲（global/private）。旧サーバーは無視するだけなので常に送る。
+  headers["X-Worker-Mode"] = normalizeMode(config.mode);
   return headers;
+}
+
+// =====================================================================
+// リソース使用率（CPU/メモリ/GPU）の計測とサーバーへの報告
+// ダッシュボードの「処理に使うPC」選択画面に表示される。
+// =====================================================================
+
+let lastCpuTimes = null;
+let latestMetrics = { cpu: null, mem: null, gpu: null, at: null };
+let gpuUnavailable = false;
+const metricsErrorLogged = new Set();
+
+function cpuTimesTotal() {
+  let idle = 0;
+  let total = 0;
+  for (const cpu of os.cpus()) {
+    for (const key of Object.keys(cpu.times)) total += cpu.times[key];
+    idle += cpu.times.idle;
+  }
+  return { idle, total };
+}
+
+// 前回サンプルとの差分からCPU使用率(%)を出す。初回は基準がないので null。
+function sampleCpuPct() {
+  const now = cpuTimesTotal();
+  let pct = null;
+  if (lastCpuTimes && now.total > lastCpuTimes.total) {
+    const dTotal = now.total - lastCpuTimes.total;
+    const dIdle = now.idle - lastCpuTimes.idle;
+    pct = Math.min(Math.max((1 - dIdle / dTotal) * 100, 0), 100);
+  }
+  lastCpuTimes = now;
+  return pct;
+}
+
+function sampleMemPct() {
+  const total = os.totalmem();
+  if (!(total > 0)) return null;
+  return Math.min(Math.max(((total - os.freemem()) / total) * 100, 0), 100);
+}
+
+// GPU使用率は nvidia-smi があれば取得（複数GPUは最大値）。無い環境（macOS等）は null。
+function sampleGpuPct() {
+  if (gpuUnavailable) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    execFile(
+      "nvidia-smi",
+      ["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+      { timeout: 2000 },
+      (err, stdout) => {
+        if (err) {
+          if (err.code === "ENOENT") gpuUnavailable = true;
+          return resolve(null);
+        }
+        const vals = String(stdout).trim().split("\n")
+          .map((v) => Number(v.trim()))
+          .filter((v) => Number.isFinite(v));
+        resolve(vals.length ? Math.max(...vals) : null);
+      }
+    );
+  });
+}
+
+async function metricsLoop() {
+  sampleCpuPct(); // 差分計測の基準を作る
+  while (!stopping) {
+    await sleep(METRICS_INTERVAL_MS);
+    if (stopping) break;
+    const gpu = await sampleGpuPct();
+    latestMetrics = { cpu: sampleCpuPct(), mem: sampleMemPct(), gpu, at: nowIso() };
+    for (const account of activeAccounts()) {
+      try {
+        const r = await postJson(account, "/api/audio/worker/metrics", {
+          cpu: latestMetrics.cpu,
+          mem: latestMetrics.mem,
+          gpu: latestMetrics.gpu,
+        });
+        rememberWorkerIdentity(account, r);
+        metricsErrorLogged.delete(account.email);
+      } catch (e) {
+        // 旧サーバー（エンドポイント未実装）等では毎回失敗するので、ログは1回だけ。
+        if (!metricsErrorLogged.has(account.email)) {
+          metricsErrorLogged.add(account.email);
+          console.error(`[${account.email}] メトリクス送信に失敗（以後同じログは抑制）: ${e.message}`);
+        }
+      }
+    }
+  }
 }
 
 function serverUrl(pathname) {
@@ -321,7 +423,10 @@ function activeAccounts() {
 }
 
 async function workerLoop() {
-  console.log(`audio-worker 起動: ${cleanBaseUrl(config.baseUrl)} / ${POLL_INTERVAL_MS / 1000}秒間隔 / PC名=${HOST_LABEL || "(不明)"}`);
+  console.log(
+    `audio-worker 起動: ${cleanBaseUrl(config.baseUrl)} / ${POLL_INTERVAL_MS / 1000}秒間隔 ` +
+    `/ PC名=${HOST_LABEL || "(不明)"} / モード=${normalizeMode(config.mode)}`
+  );
   while (!stopping) {
     const accounts = activeAccounts();
     if (!accounts.length) {
@@ -402,6 +507,9 @@ function htmlPage() {
     .pill.ok { background:#e7f6ec; color:var(--ok); }
     .pill.err { background:#fff1f0; color:var(--danger); }
     .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    .modes { margin-top:14px; display:grid; gap:6px; }
+    .mode-option { display:flex; align-items:flex-start; gap:8px; margin:0; font-size:13px; color:var(--ink); cursor:pointer; }
+    .mode-option input { width:auto; margin-top:2px; }
     #notice { min-height:20px; }
     @media (max-width:760px) {
       .grid, .add { grid-template-columns:1fr; }
@@ -428,6 +536,19 @@ function htmlPage() {
         <div class="small muted" id="configPath"></div>
         <button id="saveSettings">保存</button>
       </div>
+      <div class="modes">
+        <label style="margin-bottom:4px">このPCの処理モード</label>
+        <label class="mode-option">
+          <input type="radio" name="workerMode" value="private" checked>
+          <span><strong>private</strong> — このPCで登録したアカウントの音声だけを処理します</span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="workerMode" value="global">
+          <span><strong>global</strong> — このサービスの全ユーザーの音声処理を担うPCとして公開します</span>
+        </label>
+        <div class="small muted">モードは「保存」で反映されます。globalでは他のユーザーの音声データがこのPCにダウンロードされて処理されます。</div>
+      </div>
+      <div class="small muted" id="metricsLine" style="margin-top:10px"></div>
     </section>
     <section>
       <h2>アカウント追加</h2>
@@ -474,6 +595,11 @@ function htmlPage() {
     }
 
     let baseUrlDirty = false;
+    let modeDirty = false;
+
+    function pct(v) {
+      return (v === null || v === undefined) ? '—' : Math.round(v) + '%';
+    }
 
     async function load() {
       const state = await api('/api/state');
@@ -481,8 +607,15 @@ function htmlPage() {
       if (!baseUrlDirty && document.activeElement !== baseUrlInput) {
         baseUrlInput.value = state.baseUrl || '';
       }
+      if (!modeDirty) {
+        const radio = document.querySelector('input[name="workerMode"][value="' + (state.mode || 'private') + '"]');
+        if (radio) radio.checked = true;
+      }
+      const m = state.metrics || {};
+      $('metricsLine').textContent =
+        'このPCの使用率 (' + state.metricsSec + '秒ごとにサーバーへ送信): CPU ' + pct(m.cpu) + ' / メモリ ' + pct(m.mem) + ' / GPU ' + pct(m.gpu);
       $('configPath').textContent = '設定: ' + state.configPath;
-      $('topState').textContent = state.accounts.length + '件 / ' + state.pollSec + '秒間隔';
+      $('topState').textContent = state.accounts.length + '件 / ' + state.pollSec + '秒間隔 / ' + (state.mode || 'private');
       if (!state.accounts.length) {
         $('accounts').innerHTML = '<p class="muted">まだアカウントがありません。</p>';
         return;
@@ -505,9 +638,11 @@ function htmlPage() {
     }
 
     async function saveSettings() {
-      await api('/api/settings', { method:'POST', body: JSON.stringify({ baseUrl: $('baseUrl').value }) });
+      const mode = document.querySelector('input[name="workerMode"]:checked')?.value || 'private';
+      await api('/api/settings', { method:'POST', body: JSON.stringify({ baseUrl: $('baseUrl').value, mode }) });
       baseUrlDirty = false;
-      $('notice').textContent = 'サーバーURLを保存しました';
+      modeDirty = false;
+      $('notice').textContent = '設定を保存しました（モード: ' + mode + '）';
       await load();
     }
 
@@ -542,6 +677,9 @@ function htmlPage() {
     }
 
     $('baseUrl').addEventListener('input', () => { baseUrlDirty = true; });
+    document.querySelectorAll('input[name="workerMode"]').forEach((el) => {
+      el.addEventListener('change', () => { modeDirty = true; });
+    });
     $('baseUrl').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') saveSettings();
     });
@@ -563,6 +701,7 @@ async function handleUi(req, res) {
     if (req.method === "POST" && u.pathname === "/api/settings") {
       const body = await readJson(req);
       config.baseUrl = cleanBaseUrl(body.baseUrl);
+      if (body.mode !== undefined) config.mode = normalizeMode(body.mode);
       saveConfig();
       return sendJson(res, 200, { ok: true });
     }
@@ -648,6 +787,9 @@ process.on("SIGINT", requestStop);
 process.on("SIGTERM", requestStop);
 
 startUi();
+metricsLoop().catch((e) => {
+  console.error(`メトリクス送信ループが停止しました: ${e.message}`);
+});
 workerLoop().catch((e) => {
   console.error(e);
   process.exitCode = 1;

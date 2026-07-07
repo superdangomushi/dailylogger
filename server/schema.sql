@@ -161,9 +161,27 @@ CREATE TABLE IF NOT EXISTS audio_workers (
   ip           VARCHAR(64)  NULL,
   name         VARCHAR(255) NOT NULL,
   allowed      TINYINT(1)   NOT NULL DEFAULT 1,
+  -- 公開範囲。private=クライアントでログインしたアカウントのジョブのみ、
+  -- global=全ユーザーのジョブを処理できる（クライアントUIで選択）。
+  mode         VARCHAR(16)  NOT NULL DEFAULT 'private',
+  -- クライアントが3秒ごとに報告するリソース使用率（PC選択画面の表示用）。
+  cpu_pct      FLOAT        NULL,
+  mem_pct      FLOAT        NULL,
+  gpu_pct      FLOAT        NULL,
+  metrics_at   DATETIME     NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_seen_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY idx_workers_email (email)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- globalワーカーPCに対する各ユーザーの利用可否（行が無ければ利用する扱い）。
+-- audio_workers.allowed は所有者自身の稼働設定なので、他ユーザー分はここで持つ。
+CREATE TABLE IF NOT EXISTS audio_worker_prefs (
+  email      VARCHAR(255) NOT NULL,
+  worker_id  INT          NOT NULL,
+  allowed    TINYINT(1)   NOT NULL DEFAULT 1,
+  updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (email, worker_id)
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- 送信済みリマインド通知の記録（履歴・二重送信防止の補助）。
