@@ -426,6 +426,28 @@ async function listTranscriptsByEmail(email, limit = 100, { contains = null } = 
   return rows;
 }
 
+// 未解析（analyzed_at が NULL）の文字起こしを古い順に返す（一括解析用）。
+// 本文ごと返すので limit は小さく保つこと。
+async function listUnanalyzedTranscripts(email, limit = 10) {
+  const [rows] = await pool.query(
+    `SELECT id, filename, content FROM transcripts
+     WHERE email = ? AND analyzed_at IS NULL
+     ORDER BY id ASC
+     LIMIT ?`,
+    [email, Number(limit) || 10]
+  );
+  return rows;
+}
+
+// 未解析の残り件数（一括解析の進捗表示用）。
+async function countUnanalyzedTranscripts(email) {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS n FROM transcripts WHERE email = ? AND analyzed_at IS NULL`,
+    [email]
+  );
+  return Number(rows[0]?.n || 0);
+}
+
 // アカウント本人の 1 件を中身ごと取得（Android アプリなど、認証付き API 用）。
 async function getTranscriptForEmail(email, id) {
   const [rows] = await pool.query(
@@ -1422,6 +1444,8 @@ module.exports = {
   getAnalysis,
   getTodaysAnalysisByEmail,
   listTranscriptsByEmail,
+  listUnanalyzedTranscripts,
+  countUnanalyzedTranscripts,
   getTranscriptForEmail,
   getTranscriptsForDay,
   listEmailsForDailySummary,

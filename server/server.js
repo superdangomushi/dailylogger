@@ -1496,6 +1496,42 @@ app.post("/api/transcripts/:id/analyze", heavyLimiter, async (req, res) => {
   }
 });
 
+// 一括解析: 未解析（analyzed_at IS NULL）の文字起こしをまとめて解析する。
+// Gemini 呼び出しは1件ずつ直列に行うため、1リクエストあたりの件数を絞り、
+// まだ残りがあれば remaining で返す（クライアントは remaining が 0 になるまで続けて呼ぶ）。
+const BULK_ANALYZE_BATCH = 10;
+app.post("/api/transcripts/analyze-unanalyzed", heavyLimiter, async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  if (!(await gemini.isConfiguredFor(account.email))) {
+    return res.status(400).json({ ok: false, error: gemini.NO_KEY_MESSAGE });
+  }
+  try {
+    const rows = await db.listUnanalyzedTranscripts(account.email, BULK_ANALYZE_BATCH);
+    let analyzed = 0;
+    const failed = [];
+    for (const row of rows) {
+      try {
+        await runAnalysisPipeline(account.email, row.id, row.content);
+        analyzed++;
+      } catch (e) {
+        console.error(`一括解析に失敗 (${account.email} ${row.filename}):`, e.message);
+        failed.push({ id: row.id, filename: row.filename, error: String(e.message || "").slice(0, 200) });
+        // キーが無効なら以降も全件失敗するので打ち切る。
+        if (String(e.message || "").includes("API key not valid")) break;
+      }
+    }
+    const remaining = await db.countUnanalyzedTranscripts(account.email);
+    console.log(
+      `一括解析: ${account.email} -> 成功 ${analyzed} 件 / 失敗 ${failed.length} 件 / 残り ${remaining} 件`
+    );
+    res.json({ ok: true, analyzed, failed, remaining });
+  } catch (e) {
+    console.error(`一括解析に失敗 (${account.email}):`, e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
 // ログイン中アカウント本人の文字起こし本文を返す。
 app.get("/api/transcripts/:id", async (req, res) => {
   const account = await authFromReq(req);
@@ -2431,6 +2467,10 @@ function renderDashboard() {
             <button class="small" onclick="searchTranscripts()">本文検索</button>
             <button class="ghost small" onclick="clearTranscriptSearch()">解除</button>
             <span id="trSearchState" class="muted"></span>
+          </div>
+          <div class="row">
+            <button class="small" id="bulkAnalyzeBtn" onclick="analyzeAllUnanalyzed()">未解析を一括解析</button>
+            <span id="bulkAnalyzeState" class="muted"></span>
           </div>
         </div>
         <div id="transcripts"><p class="muted">読み込み中…</p></div>
@@ -3483,6 +3523,35 @@ function renderDashboard() {
         if(!j.ok){ alert('解析に失敗しました: '+(j.error||'')); }
         else { loadTasks(); }
       } catch(e){ alert('解析に失敗しました（通信エラー）'); }
+      await loadTranscripts();
+    }
+    // 「未解析を一括解析」ボタン: 未解析のファイルをサーバー側でまとめて解析する。
+    // サーバーは1回の呼び出しで数件ずつ処理して残り件数を返すので、0 になるまで繰り返し呼ぶ。
+    async function analyzeAllUnanalyzed(){
+      const btn = $('bulkAnalyzeBtn'), st = $('bulkAnalyzeState');
+      const total = allTranscripts.filter(t => !t.analyzed_at).length;
+      if(!total){ st.textContent = '未解析のファイルはありません'; return; }
+      if(!confirm('未解析の '+total+' 件をAI解析します（Gemini APIを件数分呼び出します）。よろしいですか？')) return;
+      btn.disabled = true;
+      let done = 0, failed = [];
+      st.textContent = '解析中… 0/'+total;
+      try {
+        while(true){
+          const r = await fetch('/api/transcripts/analyze-unanalyzed',{method:'POST',headers:headers()});
+          const j = await r.json();
+          if(!j.ok){ st.textContent = '✗ '+(j.error||'解析に失敗しました'); break; }
+          done += j.analyzed; failed = failed.concat(j.failed||[]);
+          if(j.remaining > 0 && j.analyzed > 0){
+            st.textContent = '解析中… '+done+'/'+(done + j.remaining);
+            continue;
+          }
+          st.textContent = '✓ '+done+' 件を解析しました'+
+            (failed.length ? '（'+failed.length+' 件失敗: '+failed[0].error+'）' : '');
+          break;
+        }
+      } catch(e){ st.textContent = '✗ 通信エラーで中断しました（解析済みの分は保存されています）'; }
+      btn.disabled = false;
+      loadTasks();
       await loadTranscripts();
     }
 
