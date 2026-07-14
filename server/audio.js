@@ -182,6 +182,22 @@ async function retryJob(email, id) {
   return { ok: true };
 }
 
+// ダッシュボードの「削除」。error で保留されたジョブを、保持している音声ファイル
+// ごと削除する（もう再試行しないと決めた失敗分の後片付け用）。
+async function deleteJob(email, id) {
+  const job = await db.getAudioJob(email, Number(id));
+  if (!job) return { ok: false, status: 404, error: "音声ジョブが見つかりません" };
+  if (job.status !== "error") {
+    return { ok: false, status: 400, error: "失敗状態のジョブだけ削除できます" };
+  }
+  // DELETE 側にも status='error' ガードがあるので、確認後に再試行などで状態が
+  // 変わっていたら 0 件になる。その場合は音声ファイルを消してはいけない。
+  const n = await db.deleteAudioJob(email, job.id);
+  if (!n) return { ok: false, status: 400, error: "失敗状態のジョブだけ削除できます" };
+  fs.unlink(job.stored_path, () => {});
+  return { ok: true };
+}
+
 // 起動時: 中断されたジョブを queued に戻し、定期的にキューを見る。
 function start() {
   ensureDir();
@@ -204,4 +220,5 @@ module.exports = {
   getClaimedJob,
   completeRemoteJob,
   retryJob,
+  deleteJob,
 };

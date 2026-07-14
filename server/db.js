@@ -992,6 +992,16 @@ async function retryAudioJob(email, id) {
   return r.affectedRows;
 }
 
+// error で保留されたジョブをダッシュボードから削除する。所有者チェック付きで、
+// 誤操作防止のため失敗（error）状態のものだけ消せる（音声ファイルの削除は呼び出し側）。
+async function deleteAudioJob(email, id) {
+  const [r] = await pool.query(
+    `DELETE FROM audio_jobs WHERE id = ? AND email = ? AND status = 'error'`,
+    [Number(id), email]
+  );
+  return r.affectedRows;
+}
+
 // activeOnly=true のときは未処理（queued）・処理中（processing）・失敗（error）だけを返す
 // （完了済みは文字起こし一覧側で見えるので、音声ジョブ一覧には出さない）。
 async function listAudioJobs(email, { limit = 30, activeOnly = false } = {}) {
@@ -1450,6 +1460,7 @@ module.exports = {
   failAudioJob,
   getAudioJob,
   retryAudioJob,
+  deleteAudioJob,
   listAudioJobs,
   requeueStaleAudioJobs,
   // summaries

@@ -1087,6 +1087,20 @@ app.post("/api/audio/jobs/:id/retry", async (req, res) => {
   }
 });
 
+// 失敗（error）で保留された音声ジョブを削除する（ダッシュボードの一括削除用）。
+// 保持していた音声ファイルも一緒に消える。error 以外の状態は削除できない。
+app.delete("/api/audio/jobs/:id", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const r = await audio.deleteJob(account.email, req.params.id);
+    if (!r.ok) return res.status(r.status || 500).json({ ok: false, error: r.error });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
 function clientIpOf(req) {
   const ip = String(req.ip || req.socket?.remoteAddress || "").trim().slice(0, 64);
   return ip || null;
@@ -2390,7 +2404,7 @@ function renderDashboard() {
         </p>
         <div id="audioWorkers" style="margin-bottom:.8rem"><p class="muted">読み込み中…</p></div>
         <h3 style="font-size:.95rem; margin:.6rem 0 .4rem">未完了の音声（処理中・待機中・失敗）</h3>
-        <p class="muted" style="margin:.2rem 0 .5rem">まだ文字起こしが終わっていない音声を状態別に表示します（見出しをクリックで折りたたみ）。完了した音声は下の履歴に文字起こしとして並びます。処理に失敗した音声は自動で数回まで再割り振りされ、それでも失敗したものは「失敗」に残ります（音声ファイルは保持されるので「再試行」できます）。</p>
+        <p class="muted" style="margin:.2rem 0 .5rem">まだ文字起こしが終わっていない音声を状態別に表示します（見出しをクリックで折りたたみ）。完了した音声は下の履歴に文字起こしとして並びます。処理に失敗した音声は自動で数回まで再割り振りされ、それでも失敗したものは「失敗」に残ります（音声ファイルは保持されるので「再試行」できます）。失敗分はチェックを付けてまとめて再実行・削除もできます。</p>
         <div id="audioJobs"><p class="muted">読み込み中…</p></div>
         <hr>
         <h2>文字起こしの履歴</h2>
@@ -3002,6 +3016,8 @@ function renderDashboard() {
     // 各セクションの開閉状態。自動更新（15秒ごとの再描画）で畳んだものが開き直さない
     // ように覚えておく。失敗は件数が嵩みやすいので初期状態では畳んでおく。
     const audioJobsOpen = { processing:true, queued:true, error:false };
+    // 失敗一覧でチェックされたジョブID。15秒ごとの自動再描画でも選択が消えないよう保持する。
+    const audioJobsChecked = new Set();
     async function loadAudioJobs(){
       if(!auth.email) return;
       if(audioJobsTimer) clearTimeout(audioJobsTimer);
@@ -3010,8 +3026,13 @@ function renderDashboard() {
         const r = await fetch('/api/audio/jobs?active=1&limit=100',{headers:headers()});
         const j = await r.json();
         if(!j.ok){ $('audioJobs').innerHTML='<p class="muted">'+escapeHtml(j.error||'取得失敗')+'</p>'; return; }
-        if(!j.jobs.length){ $('audioJobs').innerHTML='<p class="muted">未完了の音声はありません。</p>'; return; }
-        const row = a => '<tr><td>'+escapeHtml(a.filename)+'</td>'+
+        if(!j.jobs.length){ audioJobsChecked.clear(); $('audioJobs').innerHTML='<p class="muted">未完了の音声はありません。</p>'; return; }
+        // 失敗一覧のチェックは一覧に残っているジョブだけ有効（再試行・削除済みは外す）。
+        const errIds = new Set(j.jobs.filter(a => a.status==='error').map(a => a.id));
+        for(const id of [...audioJobsChecked]) if(!errIds.has(id)) audioJobsChecked.delete(id);
+        const row = (a, withCk) => '<tr>'+
+          (withCk ? '<td><input type="checkbox" class="audioJobCk" value="'+a.id+'"'+(audioJobsChecked.has(a.id)?' checked':'')+' onchange="audioJobCkChange(this)"></td>' : '')+
+          '<td>'+escapeHtml(a.filename)+'</td>'+
           '<td class="num">'+Math.round((a.size_bytes||0)/1024/1024*10)/10+' MB</td>'+
           '<td>'+((a.attempts||0)>1 ? a.attempts+'回目' : '')+
             (a.error?'<div class="muted">'+escapeHtml(a.error)+'</div>':'')+
@@ -3021,12 +3042,22 @@ function renderDashboard() {
         const html = ['processing','queued','error'].map(st => {
           const jobs = j.jobs.filter(a => a.status===st);
           if(!jobs.length) return '';
+          const withCk = st==='error';
+          // 失敗だけチェック列と一括操作（全選択 / まとめて再実行 / まとめて削除）を付ける。
+          const toolbar = withCk
+            ? '<div style="display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.3rem 0">'+
+              '<button class="ghost small" onclick="retryCheckedAudioJobs()">チェックした音声をまとめて再実行</button>'+
+              '<button class="ghost small" onclick="deleteCheckedAudioJobs()">チェックした音声を削除</button>'+
+              '<span class="muted" id="audioJobCkCount"></span></div>'
+            : '';
           return '<details data-st="'+st+'"'+(audioJobsOpen[st]?' open':'')+' style="margin:.3rem 0">'+
-            '<summary style="cursor:pointer; font-weight:600; padding:.2rem 0">'+AUDIO_STATUS[st]+' ('+jobs.length+'件)</summary>'+
-            '<table><thead><tr><th>ファイル</th><th>サイズ</th><th>状況</th><th>処理PC</th><th>更新</th></tr></thead><tbody>'+
-            jobs.map(row).join('')+'</tbody></table></details>';
+            '<summary style="cursor:pointer; font-weight:600; padding:.2rem 0">'+AUDIO_STATUS[st]+' ('+jobs.length+'件)</summary>'+toolbar+
+            '<table><thead><tr>'+(withCk?'<th><input type="checkbox" id="audioJobCkAll" title="全部チェック" onchange="toggleAllAudioJobCks(this.checked)"></th>':'')+
+            '<th>ファイル</th><th>サイズ</th><th>状況</th><th>処理PC</th><th>更新</th></tr></thead><tbody>'+
+            jobs.map(a => row(a, withCk)).join('')+'</tbody></table></details>';
         }).join('');
         $('audioJobs').innerHTML = html;
+        updateAudioJobCkUi();
         // 開閉状態を覚える（自動更新後の再描画にも反映される）。
         $('audioJobs').querySelectorAll('details').forEach(d => {
           d.addEventListener('toggle', () => { audioJobsOpen[d.dataset.st] = d.open; });
@@ -3042,6 +3073,53 @@ function renderDashboard() {
         if(!j.ok){ alert('再試行できません: '+(j.error||'')); return; }
       } catch(e){ alert('再試行に失敗しました'); return; }
       loadAudioJobs();
+    }
+    function audioJobCkChange(el){
+      const id = Number(el.value);
+      if(el.checked) audioJobsChecked.add(id); else audioJobsChecked.delete(id);
+      updateAudioJobCkUi();
+    }
+    function toggleAllAudioJobCks(on){
+      document.querySelectorAll('#audioJobs .audioJobCk').forEach(el => {
+        el.checked = on;
+        const id = Number(el.value);
+        if(on) audioJobsChecked.add(id); else audioJobsChecked.delete(id);
+      });
+      updateAudioJobCkUi();
+    }
+    function updateAudioJobCkUi(){
+      const count = $('audioJobCkCount');
+      if(count) count.textContent = audioJobsChecked.size ? audioJobsChecked.size+'件選択中' : '';
+      const all = $('audioJobCkAll');
+      if(all){
+        const boxes = document.querySelectorAll('#audioJobs .audioJobCk');
+        all.checked = boxes.length > 0 && [...boxes].every(b => b.checked);
+      }
+    }
+    // チェックした失敗ジョブへの一括操作。1件ずつ順に叩き、失敗があればまとめて知らせる。
+    async function bulkAudioJobs(op){
+      const ids = [...audioJobsChecked];
+      let failed = 0;
+      for(const id of ids){
+        try {
+          const r = op==='delete'
+            ? await fetch('/api/audio/jobs/'+id,{method:'DELETE',headers:headers()})
+            : await fetch('/api/audio/jobs/'+id+'/retry',{method:'POST',headers:headers()});
+          const j = await r.json();
+          if(!j.ok) failed++; else audioJobsChecked.delete(id);
+        } catch(e){ failed++; }
+      }
+      if(failed) alert(failed+'件は'+(op==='delete'?'削除':'再実行')+'できませんでした');
+      loadAudioJobs();
+    }
+    async function retryCheckedAudioJobs(){
+      if(!audioJobsChecked.size){ alert('再実行する音声にチェックを入れてください'); return; }
+      await bulkAudioJobs('retry');
+    }
+    async function deleteCheckedAudioJobs(){
+      if(!audioJobsChecked.size){ alert('削除する音声にチェックを入れてください'); return; }
+      if(!confirm('チェックした'+audioJobsChecked.size+'件の失敗ジョブを削除しますか？（音声ファイルも消え、再試行できなくなります）')) return;
+      await bulkAudioJobs('delete');
     }
 
     // ---- Waseda アカウント連携 ----

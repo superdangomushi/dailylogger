@@ -60,6 +60,10 @@ JS関数はすべて `renderDashboard()` 内の `<script>` にある。
    失敗は件数が嵩みやすいので初期状態では畳んである）。**完了した音声は出ない**
    （完了分は下の履歴に文字起こしとして現れる）。未完了がある間は15秒ごとに自動更新。
    失敗ジョブの行には**「再試行」ボタン**（`retryAudioJob()` → `POST /api/audio/jobs/:id/retry`）。
+   失敗セクションには行ごとの**チェックボックス**（ヘッダのチェックで全選択）と、
+   **「チェックした音声をまとめて再実行」「チェックした音声を削除」**の一括ボタンがある
+   （`retryCheckedAudioJobs()` / `deleteCheckedAudioJobs()` → 1件ずつ retry / `DELETE /api/audio/jobs/:id`）。
+   チェック状態は `audioJobsChecked`（Set）に持ち、15秒ごとの自動再描画でも消えない。
    2回目以降の試行は「N回目」と表示される（自動再試行の仕組みは docs/06 参照）。
 4. **文字起こしの履歴** — 一覧は `loadTranscripts()` → `renderTranscripts()`。
    - ファイル名絞り込み（`#trName`、入力のたび）
