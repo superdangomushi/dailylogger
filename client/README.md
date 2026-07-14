@@ -30,9 +30,13 @@ Then open the local UI:
 http://127.0.0.1:39123
 ```
 
-Set the public server URL, then add one or more accounts with email and
-password. The password is used only once for `/api/login`; the worker stores the
-returned token in `client/accounts.json` and does not save the password.
+The first phase after startup is **client registration** (account setup):
+set the public server URL and this PC's display name, then log in with email
+and password. The client generates a UUID (`clientId`) for this PC and
+registers it together with the display name via `POST /api/client/register`.
+Only registered accounts start processing jobs. The password is used only once
+for `/api/login`; the worker stores the returned token and the generated
+`clientId` in `client/accounts.json` and does not save the password.
 
 The worker polls every enabled account every 10 seconds by default. Change it
 with:
@@ -62,15 +66,22 @@ AUDIO_WORKER_POLL_SEC=5 npm start
 
 ## Flow
 
-1. The local UI logs in with `POST /api/login` and stores tokens per account.
-2. `POST /api/audio/worker/claim` claims one queued job for each enabled account.
-3. `GET /api/audio/worker/jobs/:id/file` downloads the audio file.
-4. `client/stt/transcribe.py` transcribes the file on this PC.
-5. `POST /api/audio/worker/jobs/:id/result` sends `{ "text": "..." }` back.
+All requests are JSON based: every request body carries the credentials
+(`auth.email` / `auth.token`) and this PC's `clientId` (UUID).
 
-The server then saves the returned text as a transcript and runs the same
-Gemini analysis, task updates, cancellations, and daily-summary refresh as a
-normal text upload.
+1. The local UI logs in with `POST /api/login` and stores tokens per account.
+2. `POST /api/client/register` registers this PC (client-generated UUID +
+   user-chosen display name). This is the mandatory first phase.
+3. `POST /api/client/claim` claims one queued job for each enabled account.
+4. `POST /api/client/jobs/download` (`{auth, clientId, jobId}`) downloads the
+   audio file as the response body.
+5. `client/stt/transcribe.py` transcribes the file on this PC.
+6. `POST /api/client/jobs/result` sends `{ jobId, text }` (or `{ jobId, error }`) back.
+
+The server then saves the returned text as a transcript. If the job owner has
+Gemini auto-analysis enabled, it also runs the same Gemini analysis, task
+updates, cancellations, and daily-summary refresh as a normal text upload;
+otherwise the user triggers analysis manually from the dashboard.
 
 ## Multiple worker PCs
 
@@ -79,17 +90,17 @@ account. Each claim atomically marks exactly one queued job as `processing`,
 so concurrent workers always receive different jobs and the queue is spread
 across whichever PCs are idle.
 
-The **server** assigns an ID to each worker PC on its first claim and returns
-it in the claim response. This client stores the ID per account in
-`accounts.json`, shows it in the local UI, and echoes it back via the
-`X-Worker-Id` header (it also sends its hostname as `X-Worker-Name` for
-display). Older clients that send neither header still work: the server
-recognizes them by their source IP and assigns an ID automatically.
+The client generates its own ID (UUID) per account entry and registers it with
+the server; the server rejects a UUID already owned by another account, in
+which case the client regenerates and retries. Download and result requests
+are only accepted from the exact client that claimed the job (matching
+`clientId` owned by the authenticated account), so audio can never be fetched
+by impersonating another client and results can never be attributed to the
+wrong user. The legacy header/IP-based protocol was removed; old clients must
+be updated.
 
 On the server dashboard (files tab), each user can select which of their
 worker PCs are allowed to process audio — multiple PCs can be checked at
-once. Unchecked PCs keep polling but receive no jobs. The server also records
-which worker claimed each job, so if a stalled job is re-queued and picked up
-by another PC, a late result from the original PC is rejected instead of
-being saved twice (for old clients that omit `X-Worker-Id`, this strict check
-is skipped to keep them compatible).
+once. Unchecked PCs keep polling but receive no jobs. If a stalled job is
+re-queued and picked up by another PC, a late result from the original PC is
+rejected instead of being saved twice.
