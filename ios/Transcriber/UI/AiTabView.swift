@@ -205,6 +205,9 @@ struct AiSettingsView: View {
                     // 通知の受け取り設定（ログイン前でも変更できる端末ローカル設定）。
                     NotificationSettingsCard()
 
+                    // 出発・雨・終電アラート（GPS＋天気予報。端末ローカル設定）。
+                    TravelSettingsCard()
+
                     // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
                     GoogleCalendarCard()
 
@@ -305,6 +308,139 @@ struct NotificationSettingsCard: View {
     // おやすみ帯・マスターON/OFF の変更は予約済みのまとめ通知に影響するので貼り直す。
     private func rescheduleDigests() {
         DispatchQueue.global().async { DailyDigestScheduler.scheduleAll() }
+    }
+}
+
+/// 出発・雨・終電アラートの設定カード（⚙連携・設定内）。
+/// 自宅のGPS登録・所要時間・終電時刻と、3機能それぞれのON/OFF。
+struct TravelSettingsCard: View {
+    private let prefs = TravelPrefs()
+    @State private var departureEnabled = false
+    @State private var rainEnabled = false
+    @State private var lastTrainEnabled = false
+    @State private var hasHome = false
+    @State private var commuteText = "60"
+    @State private var lastTrainDate = Calendar.current.date(from: DateComponents(hour: 0, minute: 20)) ?? Date()
+    @State private var lastTrainSet = false
+    @State private var homeMessage: String? = nil
+
+    var body: some View {
+        CardView {
+            Text("出発・雨・終電アラート").font(.headline)
+            Text("GPSと天気予報（Open-Meteo）を使った通知です。位置情報は常時追跡せず、チェック時の最終位置だけを使います。")
+                .font(.caption)
+
+            // ---- 自宅の登録（出発・終電の基準点） ----
+            HStack(spacing: 8) {
+                Button(hasHome ? "自宅を登録し直す" : "現在地を自宅にする") {
+                    registerHome()
+                }
+                .buttonStyle(.bordered)
+                if hasHome {
+                    Text("登録済み").font(.caption)
+                }
+            }
+            if let msg = homeMessage {
+                Text(msg).font(.caption)
+            }
+
+            // ---- 出発アラート ----
+            Toggle(isOn: $departureEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("出発アラート")
+                    Text("今日の最初の授業・予定に間に合う出発時刻を30分前に通知。雨なら10分早め＋傘の一言。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .disabled(!hasHome)
+            .onChange(of: departureEnabled) { v in prefs.departureEnabled = v }
+            if departureEnabled {
+                HStack {
+                    Text("自宅から学校までの所要時間").font(.subheadline)
+                    Spacer()
+                    TextField("60", text: $commuteText)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 60)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: commuteText) { text in
+                            let digits = String(text.filter(\.isNumber).prefix(3))
+                            if digits != text { commuteText = digits }
+                            if let v = Int(digits) { prefs.commuteMinutes = v }
+                        }
+                    Text("分").font(.subheadline)
+                }
+            }
+
+            // ---- 雨アラート ----
+            Toggle(isOn: $rainEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("雨アラート")
+                    Text("現在地の15分刻み予報で「まもなく降る」「まもなく止む」を通知。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .onChange(of: rainEnabled) { v in
+                prefs.rainEnabled = v
+                if v { TravelLocation.shared.fetchFresh { _ in } } // 権限要求＋位置キャッシュ更新
+            }
+
+            // ---- 終電アラート ----
+            Toggle(isOn: $lastTrainEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("終電アラート")
+                    Text("夜に自宅から離れた場所にいるとき、終電の60分前・20分前に通知。おやすみモード中でも鳴ります。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .disabled(!hasHome)
+            .onChange(of: lastTrainEnabled) { v in prefs.lastTrainEnabled = v }
+            if lastTrainEnabled {
+                DatePicker("最寄り駅の終電時刻", selection: $lastTrainDate, displayedComponents: .hourAndMinute)
+                    .onChange(of: lastTrainDate) { v in
+                        let c = Calendar.current.dateComponents([.hour, .minute], from: v)
+                        prefs.lastTrainTime = String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+                        lastTrainSet = true
+                    }
+                if !lastTrainSet {
+                    Text("時刻を一度動かすと保存されます。").font(.caption).foregroundColor(.secondary)
+                }
+            }
+
+            if !hasHome {
+                Text("出発・終電アラートを使うには、まず自宅の登録が必要です。")
+                    .font(.caption).foregroundColor(.red)
+            }
+        }
+        .onAppear {
+            departureEnabled = prefs.departureEnabled
+            rainEnabled = prefs.rainEnabled
+            lastTrainEnabled = prefs.lastTrainEnabled
+            hasHome = prefs.hasHome
+            commuteText = String(prefs.commuteMinutes)
+            if !prefs.lastTrainTime.isEmpty {
+                let p = prefs.lastTrainTime.split(separator: ":").compactMap { Int($0) }
+                if p.count == 2 {
+                    lastTrainDate = Calendar.current.date(from: DateComponents(hour: p[0], minute: p[1])) ?? lastTrainDate
+                    lastTrainSet = true
+                }
+            }
+        }
+    }
+
+    private func registerHome() {
+        homeMessage = "現在地を取得中…"
+        TravelLocation.shared.fetchFresh { loc in
+            DispatchQueue.main.async {
+                if let loc {
+                    prefs.setHome(lat: loc.coordinate.latitude, lon: loc.coordinate.longitude)
+                    hasHome = true
+                    homeMessage = "自宅を登録しました（現在地）"
+                } else {
+                    homeMessage = "現在地を取得できませんでした。位置情報の許可と電波状況を確認してください。"
+                }
+            }
+        }
     }
 }
 

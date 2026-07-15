@@ -92,6 +92,8 @@ final class BackgroundSync {
 
     /// 1回だけ同期パスを実行する（BGAppRefreshTask 用）。ブロッキング。
     func runOnce() {
+        // 出発・雨・終電アラートはログイン不要の機能も含むため、ログイン判定の外で回す。
+        TravelAssistant.check()
         guard accountStore.loggedIn else { return }
         uploadPending()
         uploadPendingAudio()
@@ -101,6 +103,7 @@ final class BackgroundSync {
 
     private func loop() {
         while isRunning() {
+            TravelAssistant.check()
             if accountStore.loggedIn {
                 uploadPending()
                 uploadPendingAudio()

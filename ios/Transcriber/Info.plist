@@ -28,6 +28,8 @@
 	</array>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>バックグラウンドで常時録音し、端末内で文字起こしするために使用します。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>出発・雨・終電アラートのため、自宅の登録と現在地の天気・外出判定に使用します。常時追跡はしません。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

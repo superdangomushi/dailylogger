@@ -23,6 +23,8 @@ struct CalendarTabView: View {
         let byDate = buildByDate()
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                // 出発・雨・終電の現在状況（機能を1つでも有効にしていれば表示）。
+                TravelStatusCard()
                 // 月移動
                 HStack {
                     Button("‹ 前月") { moveMonth(-1) }
@@ -200,5 +202,75 @@ struct CalendarTabView: View {
             }
         }
         return Dictionary(grouping: list) { $0.date }
+    }
+}
+
+/// 予定タブ上部の「出発・天気・終電」状況カード。
+/// 1分ごとに再計算（天気は10分キャッシュ）。全機能OFFなら何も表示しない。
+struct TravelStatusCard: View {
+    @State private var enabledAny = false
+    @State private var status: TravelAssistant.Status? = nil
+
+    var body: some View {
+        Group {
+            if enabledAny {
+                CardView {
+                    HStack {
+                        Text("出発・天気").font(.subheadline.bold())
+                        Spacer()
+                        if let temp = status?.temp {
+                            Text("\(status?.rainingNow == true ? "☔ " : "")\(Int(temp.rounded()))℃")
+                                .font(.subheadline)
+                        }
+                    }
+                    if let s = status {
+                        content(s)
+                    } else {
+                        Text("読み込み中…").font(.caption)
+                    }
+                }
+            }
+        }
+        .task {
+            while !Task.isCancelled {
+                let prefs = TravelPrefs()
+                enabledAny = prefs.departureEnabled || prefs.rainEnabled || prefs.lastTrainEnabled
+                if enabledAny {
+                    status = await withCheckedContinuation { cont in
+                        DispatchQueue.global().async { cont.resume(returning: TravelAssistant.status()) }
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ s: TravelAssistant.Status) -> some View {
+        // 出発の目安。
+        if let title = s.nextEventTitle, let departureAt = s.departureAt {
+            Text("次: \(title)（\(s.nextEventStart ?? "")〜）").font(.subheadline)
+            let inMin = s.departureInMin ?? 0
+            Text(
+                inMin > 0 ? "⏰ \(departureAt) に出発（あと\(inMin)分）"
+                : inMin > -10 ? "⏰ 出発時間です！（目安 \(departureAt)）"
+                : "⏰ 出発目安 \(departureAt) を過ぎています"
+            )
+            .font(.body.bold())
+            .foregroundColor(inMin <= 10 ? .red : AppTheme.primary)
+            if s.umbrella {
+                Text("☔ 降水確率\(s.precipProb ?? 0)%。傘を持って。").font(.caption)
+            }
+        }
+        // 雨の降り出し・止み。
+        if let t = s.rainStartsAt { Text("☔ \(t)ごろから雨の予報").font(.caption) }
+        if let t = s.rainStopsAt { Text("☂ \(t)ごろに止む見込み").font(.caption) }
+        // 終電カウントダウン（外出中のみ強調）。
+        if let at = s.lastTrainAt, let inMin = s.lastTrainInMin {
+            let away = s.awayFromHome == true
+            Text("🚃 終電 \(at) まであと\(inMin)分" + (away ? "（外出中）" : ""))
+                .font(.subheadline)
+                .foregroundColor(away && inMin <= 60 ? .red : .secondary)
+        }
     }
 }
