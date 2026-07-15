@@ -1,75 +1,310 @@
 import SwiftUI
 
-/// AIHelper 連携（ログイン）・予定/課題の確認・AIチャットをまとめたタブ。
+/// AIタブ。チャットを主役にし、今日の要約・予定/課題は折りたたみで上部に、
+/// AIHelper ログインや各種連携（Google/Moodle/Waseda/通知）は右上⚙の設定画面に分離した。
 struct AiTabView: View {
+    @EnvironmentObject var viewModel: MainViewModel
+    @State private var settingsOpen = false
+    @State private var summaryExpanded = false
+    @State private var tasksExpanded = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // ヘッダー: タイトルと設定（⚙）ボタン。
+            HStack {
+                Text("AIアシスタント").font(.headline)
+                Spacer()
+                Button {
+                    settingsOpen = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.title3)
+                        .foregroundColor(AppTheme.primary)
+                }
+                .accessibilityLabel("連携・設定")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+
+            if viewModel.ui.account.loggedIn {
+                loggedInBody
+            } else {
+                loggedOutBody
+            }
+        }
+        .background(AppTheme.background)
+        .sheet(isPresented: $settingsOpen) {
+            AiSettingsView().environmentObject(viewModel)
+        }
+        .onAppear {
+            guard viewModel.ui.account.loggedIn else { return }
+            viewModel.loadChatHistory()
+            viewModel.loadSummary()
+            viewModel.loadTasks()
+        }
+    }
+
+    /// 未ログイン時: チャットは使えないので、設定へ誘導するだけのシンプルな画面。
+    private var loggedOutBody: some View {
+        ScrollView {
+            CardView {
+                Text("AIアシスタントを使うには").font(.headline)
+                Text("AIHelper にログインすると、今日の要約や予定・課題を見ながらAIに相談・登録を頼めます。")
+                    .font(.caption)
+                Button("ログイン / 新規登録") { settingsOpen = true }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+            }
+            .padding(16)
+        }
+    }
+
+    /// ログイン時: 折りたたみの要約・予定課題を上に、残りをチャットが占める。
+    private var loggedInBody: some View {
+        VStack(spacing: 10) {
+            CollapsibleSection(title: "今日の要約", expanded: $summaryExpanded) {
+                SummaryContent()
+            }
+            CollapsibleSection(
+                title: "予定・課題",
+                badge: viewModel.ui.tasks.isEmpty ? nil : "\(viewModel.ui.tasks.count)",
+                expanded: $tasksExpanded
+            ) {
+                TasksContent()
+            }
+            Divider()
+            AiChatPanel(expandMessages: true)
+        }
+        .padding(16)
+    }
+}
+
+/// 見出しをタップで開閉するカード。既定は閉じた状態でチャットを広く見せる。
+struct CollapsibleSection<Content: View>: View {
+    let title: String
+    var badge: String? = nil
+    @Binding var expanded: Bool
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Text(title).font(.subheadline.bold())
+                    if let badge {
+                        Text(badge)
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(AppTheme.primaryContainer)
+                            .foregroundColor(AppTheme.onPrimaryContainer)
+                            .clipShape(Capsule())
+                    }
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded {
+                content.padding(.top, 10)
+            }
+        }
+        .padding(12)
+        .background(Color(.systemBackground))
+        .cornerRadius(12)
+        .shadow(color: .black.opacity(0.06), radius: 3, y: 1)
+    }
+}
+
+/// 折りたたみ内に入れる「今日の要約」の中身（見出しは CollapsibleSection 側）。
+private struct SummaryContent: View {
     @EnvironmentObject var viewModel: MainViewModel
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                AiHelperCard()
-
-                // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
-                GoogleCalendarCard()
-
-                if !viewModel.ui.account.loggedIn {
-                    Text("AIHelper にログインすると、Moodle 連携や予定・課題の確認、AIチャットが使えます。")
-                        .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Spacer()
+                Button("生成") { viewModel.generateSummary() }
+                    .disabled(viewModel.ui.summaryLoading)
+                Button("更新") { viewModel.loadSummary() }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.ui.summaryLoading)
+            }
+            if let err = viewModel.ui.summaryError {
+                Text("エラー: \(err)").foregroundColor(.red).font(.caption)
+            }
+            if viewModel.ui.summaryLoading && (viewModel.ui.summary ?? "").isEmpty {
+                Text("読み込み中…").font(.caption)
+            } else if (viewModel.ui.summary ?? "").isEmpty {
+                Text("まだ今日の要約はありません。録音がたまるか「生成」で作成できます。")
+                    .font(.caption)
+            } else {
+                ScrollView {
+                    Text(viewModel.ui.summary ?? "")
                         .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    // ---- 連携（アカウントに紐付く） ----
-                    MoodleCard()
-                    WasedaCard()
+                }
+                .frame(maxHeight: 180)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
 
-                    // ---- 1日のまとめ通知 ----
-                    DigestCard()
+/// 折りたたみ内に入れる「予定・課題」の中身。
+private struct TasksContent: View {
+    @EnvironmentObject var viewModel: MainViewModel
 
-                    // ---- 今日の要約 ----
-                    SummaryCard()
-
-                    // ---- 予定・課題 ----
-                    HStack {
-                        Text("予定・課題").font(.headline)
-                        Spacer()
-                        Button(viewModel.ui.showDoneTasks ? "未完了のみ" : "完了も表示") {
-                            viewModel.loadTasks(includeDone: !viewModel.ui.showDoneTasks)
-                        }
-                        Button("更新") { viewModel.loadTasks() }
-                            .buttonStyle(.bordered)
-                    }
-
-                    if let err = viewModel.ui.tasksError {
-                        Text("取得エラー: \(err)")
-                            .foregroundColor(.red)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    if viewModel.ui.tasksLoading && viewModel.ui.tasks.isEmpty {
-                        Text("読み込み中…").font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if viewModel.ui.tasks.isEmpty {
-                        Text("表示できる予定・課題はありません。").font(.caption)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Button(viewModel.ui.showDoneTasks ? "未完了のみ" : "完了も表示") {
+                    viewModel.loadTasks(includeDone: !viewModel.ui.showDoneTasks)
+                }
+                .font(.caption)
+                Spacer()
+                Button("更新") { viewModel.loadTasks() }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+            }
+            if let err = viewModel.ui.tasksError {
+                Text("取得エラー: \(err)").foregroundColor(.red).font(.caption)
+            }
+            if viewModel.ui.tasksLoading && viewModel.ui.tasks.isEmpty {
+                Text("読み込み中…").font(.caption)
+            } else if viewModel.ui.tasks.isEmpty {
+                Text("表示できる予定・課題はありません。").font(.caption)
+            } else {
+                ScrollView {
+                    VStack(spacing: 8) {
                         ForEach(viewModel.ui.tasks) { task in
                             TaskCardView(task: task)
                         }
                     }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
 
-                    if let msg = viewModel.ui.googleMessage {
-                        Text(msg).font(.caption)
+/// 右上⚙から開く連携・設定画面。AIHelper ログインや Google/Moodle/Waseda/通知をここに集約した。
+struct AiSettingsView: View {
+    @EnvironmentObject var viewModel: MainViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 12) {
+                    AiHelperCard()
+
+                    // 通知の受け取り設定（ログイン前でも変更できる端末ローカル設定）。
+                    NotificationSettingsCard()
+
+                    // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
+                    GoogleCalendarCard()
+
+                    if viewModel.ui.account.loggedIn {
+                        MoodleCard()
+                        WasedaCard()
+                        DigestCard()
+                    } else {
+                        Text("AIHelper にログインすると、Moodle / Waseda 連携やまとめ通知を設定できます。")
+                            .font(.caption)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-
-                    // ---- AIチャット ----
-                    CardView {
-                        Text("AIに聞く / 頼む").font(.headline)
-                        AiChatPanel(expandMessages: false)
-                    }
+                }
+                .padding(16)
+            }
+            .background(AppTheme.background)
+            .navigationTitle("連携・設定")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完了") { dismiss() }
                 }
             }
-            .padding(16)
         }
+    }
+}
+
+/// 通知の受け取り設定カード。マスターON/OFFと「おやすみモード」（指定時間帯は通知しない）。
+/// 就寝中に締切リマインドやまとめ通知が鳴り響かないようにする。
+struct NotificationSettingsCard: View {
+    private let prefs = NotificationPrefs()
+    @State private var enabled = true
+    @State private var quietEnabled = false
+    @State private var quietStart = Calendar.current.date(from: DateComponents(hour: 23, minute: 0)) ?? Date()
+    @State private var quietEnd = Calendar.current.date(from: DateComponents(hour: 7, minute: 0)) ?? Date()
+
+    var body: some View {
+        CardView {
+            Text("通知").font(.headline)
+
+            Toggle(isOn: $enabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("通知を受け取る")
+                    Text("締切リマインドと1日のまとめ通知のON/OFF。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .onChange(of: enabled) { v in
+                prefs.enabled = v
+                rescheduleDigests()
+            }
+
+            Toggle(isOn: $quietEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("おやすみモード")
+                    Text("指定した時間帯は通知しません。リマインドは時間帯が明けてから届きます。")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+            }
+            .disabled(!enabled)
+            .onChange(of: quietEnabled) { v in
+                prefs.quietEnabled = v
+                rescheduleDigests()
+            }
+
+            if enabled && quietEnabled {
+                HStack {
+                    DatePicker("開始", selection: $quietStart, displayedComponents: .hourAndMinute)
+                        .onChange(of: quietStart) { v in
+                            prefs.quietStart = hhmm(v); rescheduleDigests()
+                        }
+                    DatePicker("終了", selection: $quietEnd, displayedComponents: .hourAndMinute)
+                        .onChange(of: quietEnd) { v in
+                            prefs.quietEnd = hhmm(v); rescheduleDigests()
+                        }
+                }
+            }
+        }
+        .onAppear {
+            enabled = prefs.enabled
+            quietEnabled = prefs.quietEnabled
+            quietStart = parse(prefs.quietStart) ?? quietStart
+            quietEnd = parse(prefs.quietEnd) ?? quietEnd
+        }
+    }
+
+    private func hhmm(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        return String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+    }
+
+    private func parse(_ s: String) -> Date? {
+        let p = s.split(separator: ":").compactMap { Int($0) }
+        guard p.count == 2 else { return nil }
+        return Calendar.current.date(from: DateComponents(hour: p[0], minute: p[1]))
+    }
+
+    // おやすみ帯・マスターON/OFF の変更は予約済みのまとめ通知に影響するので貼り直す。
+    private func rescheduleDigests() {
+        DispatchQueue.global().async { DailyDigestScheduler.scheduleAll() }
     }
 }
 
@@ -353,37 +588,6 @@ struct DigestCard: View {
                     .buttonStyle(.bordered)
             }
         }
-    }
-}
-
-/// 今日の要約カード。サーバーの日次要約を表示し、更新/生成し直しができる。
-struct SummaryCard: View {
-    @EnvironmentObject var viewModel: MainViewModel
-
-    var body: some View {
-        CardView {
-            HStack {
-                Text("今日の要約").font(.headline)
-                Spacer()
-                Button("生成") { viewModel.generateSummary() }
-                    .disabled(viewModel.ui.summaryLoading)
-                Button("更新") { viewModel.loadSummary() }
-                    .buttonStyle(.bordered)
-                    .disabled(viewModel.ui.summaryLoading)
-            }
-            if let err = viewModel.ui.summaryError {
-                Text("エラー: \(err)").foregroundColor(.red)
-            }
-            if viewModel.ui.summaryLoading && (viewModel.ui.summary ?? "").isEmpty {
-                Text("読み込み中…").font(.caption)
-            } else if (viewModel.ui.summary ?? "").isEmpty {
-                Text("まだ今日の要約はありません。録音がたまるか「生成」で作成できます。")
-                    .font(.caption)
-            } else {
-                Text(viewModel.ui.summary ?? "")
-            }
-        }
-        .onAppear { viewModel.loadSummary() }
     }
 }
 

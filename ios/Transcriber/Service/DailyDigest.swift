@@ -40,8 +40,13 @@ enum DailyDigestScheduler {
             let old = requests.map(\.identifier).filter { $0.hasPrefix(idPrefix) }
             center.removePendingNotificationRequests(withIdentifiers: old)
 
+            // 通知OFF なら予約し直さない（削除だけ）。
+            let prefs = NotificationPrefs()
+            guard prefs.enabled else { return }
+
             DispatchQueue.global().async {
-                let times = DigestTimeStore().times
+                // おやすみ時間帯にかかる時刻は予約しない。
+                let times = DigestTimeStore().times.filter { !prefs.isQuiet(timeString: $0) }
                 guard !times.isEmpty else { return }
                 guard let body = DailyDigest.buildBody() else { return } // 未ログインなら何もしない
                 let today = Calendar.current.dateComponents([.month, .day], from: Date())

@@ -27,6 +27,11 @@ enum ReminderNotifier {
     static func poll() {
         let store = AccountStore()
         if !store.loggedIn { return }
+        // 通知OFF・おやすみモード中は取得も既読化もしない（明けてから届く）。
+        if NotificationPrefs().shouldSuppressNow() {
+            NSLog("ReminderNotifier: suppressed (notifications off or quiet hours)")
+            return
+        }
         let client = AiHelperClient()
         let reminders = client.fetchReminders(baseUrl: store.baseUrl, email: store.email, token: store.token)
         if reminders.isEmpty { return }
