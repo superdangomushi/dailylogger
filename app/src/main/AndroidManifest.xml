@@ -20,6 +20,9 @@
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <!-- 再起動後もまとめ通知・リマインドのアラームを貼り直す -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 出発・雨・終電アラート（自宅登録と現在地の天気・外出判定）。常時追跡はしない -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <uses-feature
         android:name="android.hardware.microphone"

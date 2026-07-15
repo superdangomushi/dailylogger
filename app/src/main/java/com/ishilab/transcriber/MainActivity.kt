@@ -88,6 +88,8 @@ import com.ishilab.transcriber.service.DailyDigestScheduler
 import com.ishilab.transcriber.service.DigestTimeStore
 import com.ishilab.transcriber.service.NotificationPrefs
 import com.ishilab.transcriber.service.ServiceState
+import com.ishilab.transcriber.service.TravelAssistant
+import com.ishilab.transcriber.service.TravelPrefs
 import com.ishilab.transcriber.ui.ChatMessage
 import com.ishilab.transcriber.ui.MainViewModel
 import com.ishilab.transcriber.ui.TranscriptItem
@@ -768,6 +770,8 @@ private fun CalendarTab(
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // 出発・雨・終電の現在状況（機能を1つでも有効にしていれば表示）。
+        item { TravelStatusCard() }
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1171,6 +1175,8 @@ private fun AiSettingsScreen(
             item { AiHelperCard(ui, onLogin, onRegister, onLogout, onSetSttQuality) }
             // 通知の受け取り設定（ログイン前でも変更できる端末ローカル設定）。
             item { NotificationSettingsCard() }
+            // 出発・雨・終電アラート（GPS＋天気予報。端末ローカル設定）。
+            item { TravelSettingsCard() }
             // Google 連携は端末側サインインなので AIHelper ログイン前でも表示する。
             item { GoogleCalendarCard(ui, onConnectGoogle, onDisconnectGoogle, onSetDefaultGoogle, onLoadCalendar) }
             if (ui.account.loggedIn) {
@@ -1275,6 +1281,263 @@ private fun NotificationSettingsCard() {
                         modifier = Modifier.weight(1f)
                     ) { Text("終了 $quietEnd") }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 予定タブ上部の「出発・天気・終電」状況カード。
+ * 1分ごとに再計算（天気は10分キャッシュ）。全機能OFFなら何も表示しない。
+ */
+@Composable
+private fun TravelStatusCard() {
+    val context = LocalContext.current
+    var enabledAny by remember { mutableStateOf(false) }
+    var status by remember { mutableStateOf<TravelAssistant.Status?>(null) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            val prefs = TravelPrefs(context)
+            enabledAny = prefs.departureEnabled || prefs.rainEnabled || prefs.lastTrainEnabled
+            if (enabledAny) {
+                status = withContext(Dispatchers.IO) {
+                    runCatching { TravelAssistant.status(context) }.getOrNull()
+                }
+            }
+            delay(60_000)
+        }
+    }
+
+    if (!enabledAny) return
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("出発・天気", style = MaterialTheme.typography.titleSmall)
+                val s = status
+                if (s?.temp != null) {
+                    Text(
+                        "${if (s.rainingNow) "☔ " else ""}%.0f℃".format(s.temp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+            val s = status
+            if (s == null) {
+                Text("読み込み中…", style = MaterialTheme.typography.bodySmall)
+                return@Column
+            }
+            // 出発の目安。
+            if (s.nextEventTitle != null && s.departureAt != null) {
+                Text("次: ${s.nextEventTitle}（${s.nextEventStart}〜）", style = MaterialTheme.typography.bodyMedium)
+                val inMin = s.departureInMin ?: 0
+                Text(
+                    when {
+                        inMin > 0 -> "⏰ ${s.departureAt} に出発（あと${inMin}分）"
+                        inMin > -10 -> "⏰ 出発時間です！（目安 ${s.departureAt}）"
+                        else -> "⏰ 出発目安 ${s.departureAt} を過ぎています"
+                    },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (inMin <= 10) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                )
+                if (s.umbrella) {
+                    Text("☔ 降水確率${s.precipProb}%。傘を持って。", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            // 雨の降り出し・止み。
+            s.rainStartsAt?.let { Text("☔ ${it}ごろから雨の予報", style = MaterialTheme.typography.bodySmall) }
+            s.rainStopsAt?.let { Text("☂ ${it}ごろに止む見込み", style = MaterialTheme.typography.bodySmall) }
+            // 終電カウントダウン（外出中のみ強調）。
+            if (s.lastTrainAt != null && s.lastTrainInMin != null) {
+                val away = s.awayFromHome == true
+                Text(
+                    "🚃 終電 ${s.lastTrainAt} まであと${s.lastTrainInMin}分" + if (away) "（外出中）" else "",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (away && s.lastTrainInMin <= 60) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 出発・雨・終電アラートの設定カード（⚙連携・設定内）。
+ * 自宅のGPS登録・所要時間・終電時刻と、3機能それぞれのON/OFF。
+ */
+@Composable
+private fun TravelSettingsCard() {
+    val context = LocalContext.current
+    val prefs = remember { TravelPrefs(context) }
+    var departureEnabled by remember { mutableStateOf(prefs.departureEnabled) }
+    var rainEnabled by remember { mutableStateOf(prefs.rainEnabled) }
+    var lastTrainEnabled by remember { mutableStateOf(prefs.lastTrainEnabled) }
+    var hasHome by remember { mutableStateOf(prefs.hasHome) }
+    var commuteText by remember { mutableStateOf(prefs.commuteMinutes.toString()) }
+    var lastTrainTime by remember { mutableStateOf(prefs.lastTrainTime) }
+    var homeMessage by remember { mutableStateOf<String?>(null) }
+
+    fun registerHome() {
+        homeMessage = "現在地を取得中…"
+        TravelPrefs.fetchFreshLocation(context) { loc ->
+            if (loc != null) {
+                prefs.setHome(loc.latitude, loc.longitude)
+                hasHome = true
+                homeMessage = "自宅を登録しました（現在地）"
+            } else {
+                homeMessage = "現在地を取得できませんでした。屋外や窓際で再度お試しください。"
+            }
+        }
+    }
+
+    // 位置権限が無ければ先に要求し、許可されたら自宅登録に進む。
+    val locationPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        if (grants.values.any { it }) registerHome()
+        else homeMessage = "位置情報の権限が必要です。"
+    }
+
+    fun pickLastTrain() {
+        val parts = lastTrainTime.split(':')
+        android.app.TimePickerDialog(
+            context,
+            { _, h, m ->
+                lastTrainTime = String.format("%02d:%02d", h, m)
+                prefs.lastTrainTime = lastTrainTime
+            },
+            parts.getOrNull(0)?.toIntOrNull() ?: 0,
+            parts.getOrNull(1)?.toIntOrNull() ?: 20,
+            true
+        ).show()
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("出発・雨・終電アラート", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "GPSと天気予報（Open-Meteo）を使った通知です。位置情報は常時追跡せず、チェック時の最終位置だけを使います。",
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            // ---- 自宅の登録（出発・終電の基準点） ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedButton(onClick = {
+                    if (TravelPrefs.hasLocationPermission(context)) registerHome()
+                    else locationPermLauncher.launch(
+                        arrayOf(
+                            Manifest.permission.ACCESS_FINE_LOCATION,
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
+                        )
+                    )
+                }) { Text(if (hasHome) "自宅を登録し直す" else "現在地を自宅にする") }
+                if (hasHome) {
+                    Text("登録済み", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            homeMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+
+            // ---- 出発アラート ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("出発アラート", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "今日の最初の授業・予定に間に合う出発時刻を30分前に通知。雨なら10分早め＋傘の一言。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Switch(
+                    checked = departureEnabled,
+                    onCheckedChange = { departureEnabled = it; prefs.departureEnabled = it },
+                    enabled = hasHome,
+                )
+            }
+            if (departureEnabled) {
+                OutlinedTextField(
+                    value = commuteText,
+                    onValueChange = { text ->
+                        commuteText = text.filter { it.isDigit() }.take(3)
+                        commuteText.toIntOrNull()?.let { prefs.commuteMinutes = it }
+                    },
+                    label = { Text("自宅から学校までの所要時間（分）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            // ---- 雨アラート ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("雨アラート", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "現在地の15分刻み予報で「まもなく降る」「まもなく止む」を通知。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Switch(
+                    checked = rainEnabled,
+                    onCheckedChange = { rainEnabled = it; prefs.rainEnabled = it },
+                )
+            }
+
+            // ---- 終電アラート ----
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("終電アラート", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "夜に自宅から離れた場所にいるとき、終電の60分前・20分前に通知。おやすみモード中でも鳴ります。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Switch(
+                    checked = lastTrainEnabled,
+                    onCheckedChange = { lastTrainEnabled = it; prefs.lastTrainEnabled = it },
+                    enabled = hasHome,
+                )
+            }
+            if (lastTrainEnabled) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(onClick = { pickLastTrain() }) {
+                        Text(if (lastTrainTime.isBlank()) "終電時刻を設定" else "終電 $lastTrainTime")
+                    }
+                    Text("最寄り駅の終電時刻（手動設定）", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            if (!hasHome) {
+                Text(
+                    "出発・終電アラートを使うには、まず自宅の登録が必要です。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }

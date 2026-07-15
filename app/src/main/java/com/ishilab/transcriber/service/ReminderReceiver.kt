@@ -21,6 +21,12 @@ class ReminderReceiver : BroadcastReceiver() {
                 ReminderNotifier.poll(context.applicationContext)
             } catch (e: Exception) {
                 Log.w(TAG, "reminder poll failed: ${e.message}")
+            }
+            try {
+                // 出発・雨・終電アラートも同じ15分周期でチェックする（機能OFFなら何もしない）。
+                TravelAssistant.check(context.applicationContext)
+            } catch (e: Exception) {
+                Log.w(TAG, "travel check failed: ${e.message}")
             } finally {
                 pending.finish()
             }
