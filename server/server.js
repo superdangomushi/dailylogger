@@ -2288,12 +2288,6 @@ function renderDashboard() {
   </style>
 </head>
 <body>
-  <header>
-    <div class="wrap">
-      <h1>AIHelper — あなたのAIアシスタント</h1>
-      <p>常時録音から課題・予定を拾い、締切前に通知。聞けば答え、頼めば登録します。</p>
-    </div>
-  </header>
   <main>
     <!-- ログイン画面: ボタンのみ。押すとフォームが出る -->
     <div id="login">
