@@ -524,7 +524,8 @@ async function ask(email, question, ctx = {}) {
   const actions = (Array.isArray(parsed.actions) ? parsed.actions : [])
     .filter((a) => a && a.op && a.op !== "none")
     .map((a) => {
-      const norm = normalizeDeadline(String(a.deadline ?? "").trim());
+      const rawDeadline = String(a.deadline ?? "").trim();
+      const norm = normalizeDeadline(rawDeadline);
       return {
         op: a.op,
         type: a.type === "yotei" ? "yotei" : (a.type === "kadai" ? "kadai" : ""),
@@ -532,6 +533,9 @@ async function ask(email, question, ctx = {}) {
         details: String(a.details ?? "").trim(),
         deadline_at: norm.at,
         date_only: norm.dateOnly,
+        // 日時が指定されていたのに解析できなかった場合の目印。
+        // サーバー側はこれを見て「登録したが日時未設定」と利用者に伝える。
+        deadlineUnparsed: Boolean(rawDeadline && !norm.at),
         target: String(a.target ?? "").trim(),
       };
     });
@@ -570,13 +574,15 @@ async function extractTaskRequests(email, question, today = localDate()) {
   const parsed = await callJson(apiKey, prompt, TASK_REQUEST_SCHEMA, { temperature: 0.1 });
   return (Array.isArray(parsed.tasks) ? parsed.tasks : [])
     .map((t) => {
-      const norm = normalizeDeadline(String(t.deadline ?? "").trim());
+      const rawDeadline = String(t.deadline ?? "").trim();
+      const norm = normalizeDeadline(rawDeadline);
       return {
         type: t.type === "yotei" ? "yotei" : "kadai",
         content: String(t.content ?? "").trim(),
         details: String(t.details ?? "").trim(),
         deadline_at: norm.at,
         date_only: norm.dateOnly,
+        deadlineUnparsed: Boolean(rawDeadline && !norm.at),
       };
     })
     .filter((t) => t.content);
@@ -588,15 +594,20 @@ async function extractTaskRequests(email, question, today = localDate()) {
 // "YYYY-MM-DD" / "YYYY-MM-DD HH:MM" → { at: "YYYY-MM-DD HH:MM:00" | null, dateOnly }
 // 月日が1桁（"2026-7-2"）や区切りが "/" のゆらぎも受け付ける
 // （LLM の出力ゆれで厳密な2桁ゼロ埋め形式にならず、deadline_at が黙って null になっていたのを修正）。
+// 日付と時刻の間に曜日の括弧書き（"2026-07-20(月) 10:00" 等）が挟まるゆれも吸収する。
 function normalizeDeadline(s) {
   if (!s) return { at: null, dateOnly: false };
-  const t = String(s).trim();
-  const dt = t.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})[ T](\d{1,2}):(\d{2})/);
+  const raw = String(s).trim();
+  // 括弧書きは空白1つに置換する（詰めて消すと "20（月）10:00" が "2010:00" のように
+  // 日付と時刻がくっついて解析不能になるため）。
+  const t = raw.replace(/[（(][^）)]*[）)]/g, " ").replace(/\s+/g, " ").trim();
+  const dt = t.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})[ T](\d{1,2}):(\d{1,2})/);
   if (dt) {
     const mm = dt[2].padStart(2, "0");
     const dd = dt[3].padStart(2, "0");
     const hh = dt[4].padStart(2, "0");
-    return { at: `${dt[1]}-${mm}-${dd} ${hh}:${dt[5]}:00`, dateOnly: false };
+    const min = dt[5].padStart(2, "0");
+    return { at: `${dt[1]}-${mm}-${dd} ${hh}:${min}:00`, dateOnly: false };
   }
   const d = t.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
   if (d) {
@@ -604,6 +615,10 @@ function normalizeDeadline(s) {
     const dd = d[3].padStart(2, "0");
     return { at: `${d[1]}-${mm}-${dd} ${DEFAULT_DEADLINE_TIME}:00`, dateOnly: true };
   }
+  // 非空なのに解析できなかった場合、deadline_at が黙って null になり
+  // カレンダーには出ないがタスク一覧・チャットの文脈には残る、という見え方の食い違いが起きる。
+  // 原因調査用にサーバーログへ残す。
+  console.warn(`normalizeDeadline: 日時文字列を解析できませんでした: "${raw}"`);
   return { at: null, dateOnly: false };
 }
 

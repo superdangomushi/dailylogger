@@ -1546,6 +1546,10 @@ app.post("/api/ask", askLimiter, async (req, res) => {
     const applied = [];
     // 追加された「予定」（あとで Google カレンダー登録・重複チェックに使う）。
     const addedYotei = [];
+    // 日時ありきの依頼だったのに deadline_at が解析できず null で登録された「予定」。
+    // カレンダーには表示されず「予定・課題」タブの「期限未定」にしか出ないため、
+    // 黙って登録済み扱いにせず reply で必ず伝える。
+    const unparsedYotei = [];
     for (const a of result.actions) {
       if (a.op === "add_task" && a.content) {
         await db.addTask(account.email, {
@@ -1558,6 +1562,9 @@ app.post("/api/ask", askLimiter, async (req, res) => {
         applied.push({ op: "add_task", type: a.type, content: a.content, deadline_at: a.deadline_at });
         if (a.type === "yotei" && a.deadline_at) {
           addedYotei.push({ title: a.content, deadline_at: a.deadline_at, date_only: !!a.date_only });
+        }
+        if (a.type === "yotei" && a.deadlineUnparsed) {
+          unparsedYotei.push(a.content);
         }
       } else if (a.op === "complete_task" && a.target) {
         const target = resolveTaskTarget(tasks, a.target);
@@ -1608,6 +1615,9 @@ app.post("/api/ask", askLimiter, async (req, res) => {
           if (t.type === "yotei" && t.deadline_at) {
             addedYotei.push({ title: t.content, deadline_at: t.deadline_at, date_only: !!t.date_only });
           }
+          if (t.type === "yotei" && t.deadlineUnparsed) {
+            unparsedYotei.push(t.content);
+          }
         }
         // アプリは reply の文面しか表示しないため、保険側で登録した内容は返信に明示する。
         if (fallback.length && !claimsAdd) {
@@ -1621,6 +1631,16 @@ app.post("/api/ask", askLimiter, async (req, res) => {
       } catch (e) {
         console.error("ask の登録フォールバックに失敗:", e.message);
       }
+    }
+
+    // 日時が解析できず「期限未定」のまま登録された予定を明示する。
+    // これを黙っておくと、利用者はチャットで「登録した」と言われたのに
+    // カレンダーには出てこない（実際は日付なしでタスク一覧に埋もれている）という
+    // 見た目の不整合に気づけない。
+    if (unparsedYotei.length) {
+      reply += `\n\n⚠️ ${unparsedYotei.map((c) => `「${c}」`).join("・")}は日時をうまく認識できず、` +
+        `日付未設定のまま登録しました。カレンダーには表示されません。` +
+        `「予定・課題」タブの「期限未定」から日時を設定してください。`;
     }
 
     // 追加された「予定」について:
