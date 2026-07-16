@@ -1,8 +1,9 @@
 # ダッシュボード（Web UI）ガイド
 
-`GET /` が返す1枚のHTML。**コードはすべて `server/server.js` の `renderDashboard()`**
-（約2128行目〜末尾）にテンプレート文字列で埋め込まれている。ビルド工程はない。
-UIを直したいときはこの関数内のHTML/CSS/JSを編集してサーバーを再起動するだけ。
+`GET /` が返す1枚のHTML。**コードはすべて `server/dashboard.js` の `renderDashboard()`**
+にテンプレート文字列で埋め込まれている。C++ ゲートウェイはこのレスポンスを転送するだけで、
+UIは従来どおり Node.js が生成する。UI用のビルド工程はなく、この関数内のHTML/CSS/JSを
+編集して `make run` でサーバーを再起動すればよい。
 
 ## 画面構成
 
@@ -90,7 +91,7 @@ JS関数はすべて `renderDashboard()` 内の `<script>` にある。
 
 - テンプレート文字列内なので、JS中のバッククォート・`${}`・`\` はエスケープが必要
   （既存コードは `\\'` や `\\n` を多用している）。編集後は
-  `node --check server/server.js` と、ブラウザで実際に開いての確認を必ずやる。
+  `node --check server/dashboard.js` と、ブラウザで実際に開いての確認を必ずやる。
 - ユーザー由来の文字列は必ず `escapeHtml()` を通す（XSS防止）。
 - 自動更新は `refreshCurrentTab()` に一元化されている。新しいタブ/セクションを足すときは
   ここと `loadAll()` に読み込み関数を追加する。

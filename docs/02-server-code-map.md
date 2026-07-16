@@ -1,12 +1,17 @@
 # server/ コードマップ
 
-「どのファイルの何行目あたりに何が書いてあるか」の地図。行番号は 2026-07-14 時点。
+「どのファイルの何行目あたりに何が書いてあるか」の地図。行番号は 2026-07-16 時点。
 
 ## ファイル一覧
 
 | ファイル | 行数目安 | 役割 |
 | --- | --- | --- |
-| `server.js` | ~3600 | 本体。Expressの全ルート定義 + ダッシュボードHTML + 定期ジョブの起動 |
+| `cpp/src/main.cpp` | — | 公開HTTPゲートウェイ。外部リクエスト/レスポンスを内部Node.jsへ透過転送し、Nodeプロセスの起動・終了を管理 |
+| `../client/cpp/third_party/httplib.h` | — | C++クライアントと共有するHTTP実装。ゲートウェイ固有機能はサーバービルド時のマクロだけで有効化 |
+| `test/` | — | HTTP転送の互換性と、Node子プロセスの起動・終了を検証するテスト |
+| `server.js` | ~2200 | Node.js本体。Expressの全ルート定義 + 定期ジョブの起動。C++起動時はループバックの内部ポートで待受 |
+| `dashboard.js` | ~1600 | 従来どおり Node.js が配信するダッシュボードのHTML/CSS/ブラウザJavaScript |
+| `Makefile` | — | C++のビルド/テストと、Node.js・MySQLを含むセットアップ/サーバー起動 |
 | `db.js` | ~1400 | MySQL接続・スキーマ自動作成・全クエリ関数。**SQLはこのファイルにしか書かない** |
 | `audio.js` | ~180 | 音声ジョブのライフサイクル管理（enqueue / claim / 完了処理 / 再キュー） |
 | `gemini.js` | ~630 | Gemini API 呼び出し（解析・要約・チャット）。ユーザーごとのAPIキーで動く |
@@ -128,8 +133,22 @@
 | 行 | 内容 |
 | --- | --- |
 | 2049-2140 | 日次サマリのスケジューラ（`scheduleDailySummary` / 事前生成） |
-| 2142〜約3600 | **`renderDashboard()`** — ダッシュボードのHTML+CSS+JSをテンプレート文字列で丸ごと返す。UIの変更はここ（[08-dashboard.md](08-dashboard.md) 参照） |
-| 末尾 `main()` | `db.ensureSchema()` → reminders/moodle/audio の start → `app.listen` |
+| `GET /` | `dashboard.js` の **`renderDashboard()`** が返すHTML+CSS+JSを応答する。UIの変更は `dashboard.js`（[08-dashboard.md](08-dashboard.md) 参照） |
+| 末尾 `main()` | `db.ensureSchema()` → reminders/moodle/audio の start → 内部 `app.listen` |
+
+## C++ HTTPゲートウェイ
+
+通常は `make run` で C++ ゲートウェイを公開ポートに起動する。ゲートウェイは Node.js を
+ループバックの内部ポートで起動し、HTTPメソッド、パス/クエリ、ヘッダー、本文と、Node.jsからの
+ステータス、ヘッダー、テキスト/JSON/バイナリ本文を中継する。APIルートとダッシュボードUIの実装は
+Node.js側に残るため、機能追加やUI変更の場所は従来どおり `server.js` / `dashboard.js` である。
+
+```bash
+cd server
+make build   # C++ゲートウェイをビルド
+make test    # HTTP互換テスト
+make run     # C++ゲートウェイ + 内部Node.jsを起動
+```
 
 ## audio.js の構造
 

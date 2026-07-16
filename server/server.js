@@ -52,6 +52,8 @@ const {
 const { renderDashboard } = require("./dashboard");
 
 const PORT = process.env.PORT || 3000;
+const USING_CPP_GATEWAY = process.env.AIHELPER_CPP_GATEWAY === "1";
+const HOST = USING_CPP_GATEWAY ? (process.env.AIHELPER_NODE_HOST || "127.0.0.1") : undefined;
 // 日次サマリの送信時刻（サーバーのローカル時刻）。"HH:MM" 形式。既定 21:00。
 const SUMMARY_TIME = process.env.DAILY_SUMMARY_TIME || "21:00";
 const SUMMARY_PREGENERATE_LEAD_MIN = Number(process.env.DAILY_SUMMARY_PREGENERATE_LEAD_MIN || 15);
@@ -59,6 +61,17 @@ const SUMMARY_PREGENERATE_LEAD_MIN = Number(process.env.DAILY_SUMMARY_PREGENERAT
 const app = express();
 
 app.set("trust proxy", process.env.TRUST_PROXY === "1");
+
+// C++ ゲートウェイ配下では Node から見た接続元は常に loopback になる。
+// 公開ソケットで確認した接続元だけを専用ヘッダで受け取り、従来の req.ip と同じ
+// レート制限・ワーカー表示に使う。外部から同名ヘッダが来ても C++ 側で破棄される。
+function requestIp(req) {
+  if (USING_CPP_GATEWAY) {
+    const gatewayIp = String(req.get("X-AIHelper-Gateway-Client-IP") || "").trim();
+    if (gatewayIp) return gatewayIp;
+  }
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
 
 app.use((req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -81,7 +94,7 @@ function rateLimit({ windowMs, max, keyPrefix, keyOf }) {
   }, Math.max(windowMs, 60_000)).unref();
   return (req, res, next) => {
     const now = Date.now();
-    const rawKey = keyOf ? keyOf(req) : (req.ip || req.socket.remoteAddress || "unknown");
+    const rawKey = keyOf ? keyOf(req) : requestIp(req);
     const key = `${keyPrefix}:${rawKey || "unknown"}`;
     const current = hits.get(key);
     if (!current || current.resetAt <= now) {
@@ -101,13 +114,13 @@ const authLimiter = rateLimit({
   windowMs: 15 * 60_000,
   max: 20,
   keyPrefix: "auth",
-  keyOf: (req) => `${req.ip || req.socket.remoteAddress || ""}:${String(req.body?.email || "").toLowerCase()}`,
+  keyOf: (req) => `${requestIp(req)}:${String(req.body?.email || "").toLowerCase()}`,
 });
 const heavyLimiter = rateLimit({
   windowMs: 60 * 60_000,
   max: 30,
   keyPrefix: "heavy",
-  keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || req.ip || req.socket.remoteAddress || ""),
+  keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || requestIp(req)),
 });
 // AIチャット専用の枠。heavyLimiter を使うと、録音中の端末が5分おきに再送する
 // 音声/文字起こしアップロードと同じ枠を食い合い、未送信が溜まった端末では
@@ -116,7 +129,7 @@ const askLimiter = rateLimit({
   windowMs: 60 * 60_000,
   max: 60,
   keyPrefix: "ask",
-  keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || req.ip || req.socket.remoteAddress || ""),
+  keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || requestIp(req)),
 });
 
 app.use(express.json({ limit: "10mb" }));
@@ -872,7 +885,7 @@ function runWasedaScraper(account, job) {
     cwd: scriptDir,
     env: {
       ...process.env,
-      AIHELPER_URL: `http://localhost:${PORT}`,
+      AIHELPER_URL: `http://${HOST || "localhost"}:${PORT}`,
       AIHELPER_EMAIL: account.email,
       AIHELPER_TOKEN: account.token,
     },
@@ -1004,7 +1017,7 @@ app.delete("/api/audio/jobs/:id", async (req, res) => {
 });
 
 function clientIpOf(req) {
-  const ip = String(req.ip || req.socket?.remoteAddress || "").trim().slice(0, 64);
+  const ip = String(requestIp(req)).trim().slice(0, 64);
   return ip || null;
 }
 
@@ -2180,8 +2193,8 @@ async function main() {
   // 音声文字起こしワーカーを開始。
   audio.start();
 
-  app.listen(PORT, () => {
-    console.log(`AIHelper listening on http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    console.log(`${USING_CPP_GATEWAY ? "AIHelper Node backend" : "AIHelper"} listening on http://${HOST || "localhost"}:${PORT}`);
     console.log(`accounts: ${ACCOUNTS_FILE}`);
     console.log(`DB: ${process.env.DB_NAME || "aihelper"}@${process.env.DB_HOST || "localhost"}`);
     console.log(`Gemini: ユーザーごとのAPIキー登録制 (モデル ${gemini.MODEL}) / LINE: ${line.isConfigured() ? "有効" : "未設定"}`);

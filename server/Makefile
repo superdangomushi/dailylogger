@@ -1,12 +1,12 @@
-# aihelper サーバー (Node.js + Express + MySQL) 用 Makefile
+# aihelper サーバー (C++ HTTP + Node.js/Express + MySQL) 用 Makefile
 # 想定環境: Ubuntu Server
 #
-#   make install   … これ1つで全部: Node.js + MySQL 導入 → DB/ユーザー作成 → npm 依存導入
+#   make install   … これ1つで全部: C++/Node.js/MySQL 導入 → DB/ユーザー作成 → 依存導入・ビルド
 #                     (apt / mysql 設定に sudo を使う)
 #   make run       … サーバーを起動
 #
 # 個別に実行したい場合:
-#   make system-deps … Node.js + MySQL を apt で導入し MySQL を起動 (要 sudo)
+#   make system-deps … C++ビルド環境 + Node.js + MySQL を apt で導入し MySQL を起動 (要 sudo)
 #   make db          … データベース・専用ユーザー作成 + schema.sql 適用 (要 sudo)
 #   make npm-deps    … npm 依存関係のみインストール
 #
@@ -25,6 +25,28 @@ DB_NAME     ?= aihelper
 DB_USER     ?= aihelper
 DB_PASSWORD ?= aihelper
 
+# 公開 HTTP ソケットを受ける C++ ゲートウェイ。
+CXX       ?= g++
+CPPFLAGS  += -I../client/cpp/third_party \
+	-DCPPHTTPLIB_HEADER_MAX_LENGTH=16384 \
+	-DCPPHTTPLIB_REQUEST_URI_MAX_LENGTH=16384 \
+	-DCPPHTTPLIB_LISTEN_BACKLOG=511 \
+	-DCPPHTTPLIB_EXPECT_CONTENT_FROM_HEADERS \
+	-DCPPHTTPLIB_RAW_SERVER_BODY \
+	-DCPPHTTPLIB_STRICT_REQUEST_FRAMING \
+	-DCPPHTTPLIB_STRICT_HEADER_PARSING \
+	-DCPPHTTPLIB_RAW_HEADER_VALUES \
+	-DCPPHTTPLIB_DISABLE_SERVER_RANGE \
+	-DCPPHTTPLIB_REJECT_OVERSIZED_PAYLOAD_IMMEDIATELY \
+	-DCPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS \
+	-DCPPHTTPLIB_ABSOLUTE_READ_DEADLINE \
+	-DCPPHTTPLIB_NO_AUTOMATIC_ZERO_CONTENT_LENGTH
+CXXFLAGS  ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic
+LDLIBS    += -pthread
+HTTP_BIN  := aihelper-server
+HTTP_SRC  := cpp/src/main.cpp
+HTTP_DEPS := ../client/cpp/third_party/httplib.h
+
 # これらは Node サーバー(process.env)と mysql クライアント双方へ渡す。
 export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 
@@ -39,29 +61,31 @@ MYSQL_ADMIN ?= sudo mysql --defaults-file=/etc/mysql/debian.cnf
 MYSQL_APP := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) -p$(DB_PASSWORD)
 
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps db db-user db-schema npm-deps python-deps run clean
+.PHONY: help install system-deps db db-user db-schema npm-deps python-deps build test run clean
 
 help: ## 使い方を表示
-	@echo "aihelper サーバー Makefile"
+	@echo "aihelper サーバー Makefile (C++ HTTP + Node.js UI/API)"
 	@echo ""
-	@echo "  make install       Node.js+MySQL 導入 → DB作成 → npm 依存導入 (sudo 使用)"
+	@echo "  make install       C++/Node.js/MySQL 導入 → DB作成 → 依存導入・ビルド (sudo 使用)"
+	@echo "  make build         C++ HTTP ゲートウェイをビルド"
+	@echo "  make test          HTTP 互換テストを実行"
 	@echo "  make run           サーバーを起動 (既定 http://localhost:$${PORT:-3000})"
-	@echo "  make system-deps   Node.js $(NODE_MAJOR).x と MySQL を導入・起動 (要 sudo)"
+	@echo "  make system-deps   C++ビルド環境・Node.js $(NODE_MAJOR).x・MySQL を導入 (要 sudo)"
 	@echo "  make db            DB($(DB_NAME))・ユーザー($(DB_USER))作成 + schema 適用 (要 sudo)"
 	@echo "  make npm-deps      npm 依存関係のみインストール"
 	@echo "  make python-deps   時間割スクレイパの Python 依存を scraper/.venv に導入 (要 sudo)"
-	@echo "  make clean         node_modules を削除"
+	@echo "  make clean         C++ バイナリと node_modules を削除"
 
 # ワンショット・セットアップ。前提ターゲットは記載順に実行される。
-install: system-deps db npm-deps python-deps ## これ1つでサーバーを動かせる状態にする
+install: system-deps db npm-deps python-deps build ## これ1つでサーバーを動かせる状態にする
 	@echo ""
 	@echo "✅ セットアップ完了。'make run' で起動できます。"
 	@echo "   DB: $(DB_USER)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)"
 
-system-deps: ## Node.js + MySQL を導入し MySQL を起動 (要 sudo)
-	@echo ">> Node.js $(NODE_MAJOR).x (NodeSource) と MySQL Server を導入します"
+system-deps: ## C++ビルド環境 + Node.js + MySQL を導入し MySQL を起動 (要 sudo)
+	@echo ">> C++ build tools、Node.js $(NODE_MAJOR).x (NodeSource)、MySQL Server を導入します"
 	curl -fsSL https://deb.nodesource.com/setup_$(NODE_MAJOR).x | sudo -E bash -
-	sudo apt-get install -y nodejs mysql-server
+	sudo apt-get install -y build-essential nodejs mysql-server
 	sudo systemctl enable --now mysql
 	@echo ">> Node: $$(node -v) / npm: $$(npm -v)"
 
@@ -104,8 +128,16 @@ python-deps: ## 時間割スクレイパの Python 依存 (bs4/selenium 等) を
 	@echo ">> selenium 用の Chromium ブラウザと chromedriver を導入します"
 	sudo apt-get install -y chromium-browser chromium-chromedriver
 
-run: ## サーバーを起動 (DB 認証情報は上の変数から環境変数で渡る)
-	npm start
+build: $(HTTP_BIN) ## C++ HTTP ゲートウェイをビルド
 
-clean: ## node_modules を削除
-	rm -rf node_modules
+$(HTTP_BIN): $(HTTP_SRC) $(HTTP_DEPS)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $(HTTP_SRC) -o $@ $(LDFLAGS) $(LDLIBS)
+
+test: build ## C++ HTTP ゲートウェイの互換テストを実行
+	node --test test/http-gateway.test.js test/process-supervision.test.js
+
+run: build ## C++ゲートウェイ + 内部Nodeサーバーを起動
+	./$(HTTP_BIN)
+
+clean: ## C++バイナリと node_modules を削除
+	rm -rf node_modules $(HTTP_BIN)

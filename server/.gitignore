@@ -1,4 +1,5 @@
 node_modules/
+aihelper-server
 
 # 自己登録ユーザー（パスワードハッシュを含むため管理対象外）
 users.json

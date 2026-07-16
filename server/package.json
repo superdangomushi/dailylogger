@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "summary": "node send-summary.js"
+    "summary": "node send-summary.js",
+    "test": "node --test test/http-gateway.test.js test/process-supervision.test.js"
   },
   "dependencies": {
     "express": "^4.19.2",

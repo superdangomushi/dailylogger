@@ -210,6 +210,7 @@ using socket_t = int;
 #include <atomic>
 #include <cassert>
 #include <cctype>
+#include <chrono>
 #include <climits>
 #include <condition_variable>
 #include <cstring>
@@ -221,6 +222,7 @@ using socket_t = int;
 #include <iomanip>
 #include <iostream>
 #include <list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -860,6 +862,7 @@ public:
   virtual bool is_valid() const;
 
   Server &Get(const std::string &pattern, Handler handler);
+  Server &Get(const std::string &pattern, HandlerWithContentReader handler);
   Server &Post(const std::string &pattern, Handler handler);
   Server &Post(const std::string &pattern, HandlerWithContentReader handler);
   Server &Put(const std::string &pattern, Handler handler);
@@ -869,6 +872,8 @@ public:
   Server &Delete(const std::string &pattern, Handler handler);
   Server &Delete(const std::string &pattern, HandlerWithContentReader handler);
   Server &Options(const std::string &pattern, Handler handler);
+  Server &Options(const std::string &pattern,
+                  HandlerWithContentReader handler);
 
   bool set_base_dir(const std::string &dir,
                     const std::string &mount_point = std::string());
@@ -908,6 +913,9 @@ public:
   Server &set_read_timeout(time_t sec, time_t usec = 0);
   template <class Rep, class Period>
   Server &set_read_timeout(const std::chrono::duration<Rep, Period> &duration);
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  Server &set_header_read_timeout(time_t sec, time_t usec = 0);
+#endif
 
   Server &set_write_timeout(time_t sec, time_t usec = 0);
   template <class Rep, class Period>
@@ -941,6 +949,10 @@ protected:
   time_t keep_alive_timeout_sec_ = CPPHTTPLIB_KEEPALIVE_TIMEOUT_SECOND;
   time_t read_timeout_sec_ = CPPHTTPLIB_READ_TIMEOUT_SECOND;
   time_t read_timeout_usec_ = CPPHTTPLIB_READ_TIMEOUT_USECOND;
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  time_t header_read_timeout_sec_ = 60;
+  time_t header_read_timeout_usec_ = 0;
+#endif
   time_t write_timeout_sec_ = CPPHTTPLIB_WRITE_TIMEOUT_SECOND;
   time_t write_timeout_usec_ = CPPHTTPLIB_WRITE_TIMEOUT_USECOND;
   time_t idle_interval_sec_ = CPPHTTPLIB_IDLE_INTERVAL_SECOND;
@@ -1003,6 +1015,10 @@ private:
 
   std::atomic<bool> is_running_{false};
   std::atomic<bool> done_{false};
+#ifdef CPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS
+  std::mutex active_sockets_mutex_;
+  std::set<socket_t> active_sockets_;
+#endif
 
   struct MountPointEntry {
     std::string mount_point;
@@ -1015,6 +1031,7 @@ private:
   Handler file_request_handler_;
 
   Handlers get_handlers_;
+  HandlersForContentReader get_handlers_for_content_reader_;
   Handlers post_handlers_;
   HandlersForContentReader post_handlers_for_content_reader_;
   Handlers put_handlers_;
@@ -1024,6 +1041,7 @@ private:
   Handlers delete_handlers_;
   HandlersForContentReader delete_handlers_for_content_reader_;
   Handlers options_handlers_;
+  HandlersForContentReader options_handlers_for_content_reader_;
 
   HandlerWithResponse error_handler_;
   ExceptionHandler exception_handler_;
@@ -2360,6 +2378,7 @@ public:
   size_t size() const;
   bool end_with_crlf() const;
   bool getline();
+  bool getline(size_t max_length);
 
 private:
   void append(char c);
@@ -2769,6 +2788,10 @@ inline bool stream_line_reader::end_with_crlf() const {
 }
 
 inline bool stream_line_reader::getline() {
+  return getline((std::numeric_limits<size_t>::max)());
+}
+
+inline bool stream_line_reader::getline(size_t max_length) {
   fixed_buffer_used_size_ = 0;
   glowable_buffer_.clear();
 
@@ -2787,6 +2810,7 @@ inline bool stream_line_reader::getline() {
     }
 
     append(byte);
+    if (size() > max_length) { return false; }
 
     if (byte == '\n') { break; }
   }
@@ -3003,6 +3027,105 @@ inline ssize_t select_read(socket_t sock, time_t sec, time_t usec) {
   });
 #endif
 }
+
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+inline bool &absolute_read_deadline_active() {
+  static thread_local bool active = false;
+  return active;
+}
+
+inline std::chrono::steady_clock::time_point &absolute_read_deadline() {
+  static thread_local auto deadline = std::chrono::steady_clock::time_point{};
+  return deadline;
+}
+
+inline bool &absolute_read_deadline_reached() {
+  static thread_local bool reached = false;
+  return reached;
+}
+
+inline bool absolute_read_deadline_expired() {
+  return absolute_read_deadline_active() &&
+         (absolute_read_deadline_reached() ||
+          std::chrono::steady_clock::now() >= absolute_read_deadline());
+}
+
+// Limits every blocking read made by the current request thread to one shared
+// steady-clock deadline. This prevents a peer from keeping a worker occupied
+// forever by sending one header, chunk-size, or trailer byte per idle-timeout
+// interval.
+class scoped_read_deadline {
+public:
+  explicit scoped_read_deadline(
+      std::chrono::steady_clock::time_point deadline)
+      : previous_active_(absolute_read_deadline_active()),
+        previous_deadline_(absolute_read_deadline()),
+        previous_reached_(absolute_read_deadline_reached()) {
+    absolute_read_deadline() = deadline;
+    absolute_read_deadline_reached() = false;
+    absolute_read_deadline_active() = true;
+  }
+
+  scoped_read_deadline(const scoped_read_deadline &) = delete;
+  scoped_read_deadline &operator=(const scoped_read_deadline &) = delete;
+
+  ~scoped_read_deadline() { release(); }
+
+  void release() {
+    if (released_) { return; }
+    absolute_read_deadline() = previous_deadline_;
+    absolute_read_deadline_reached() = previous_reached_;
+    absolute_read_deadline_active() = previous_active_;
+    released_ = true;
+  }
+
+private:
+  bool previous_active_ = false;
+  std::chrono::steady_clock::time_point previous_deadline_{};
+  bool previous_reached_ = false;
+  bool released_ = false;
+};
+
+inline ssize_t select_read_with_deadline(socket_t sock, time_t sec,
+                                         time_t usec) {
+  if (!absolute_read_deadline_active()) {
+    return select_read(sock, sec, usec);
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= absolute_read_deadline()) {
+    absolute_read_deadline_reached() = true;
+    return 0;
+  }
+
+  auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(
+      absolute_read_deadline() - now);
+  auto configured = std::chrono::seconds(sec) +
+                    std::chrono::microseconds(usec);
+  auto deadline_limited = true;
+  if (configured.count() >= 0 && configured < remaining) {
+    remaining = configured;
+    deadline_limited = false;
+  }
+  if (remaining.count() <= 0) {
+    if (deadline_limited) { absolute_read_deadline_reached() = true; }
+    return 0;
+  }
+
+  const auto remaining_seconds =
+      std::chrono::duration_cast<std::chrono::seconds>(remaining);
+  const auto remaining_microseconds =
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          remaining - remaining_seconds);
+  const auto result =
+      select_read(sock, static_cast<time_t>(remaining_seconds.count()),
+                  static_cast<time_t>(remaining_microseconds.count()));
+  if (result == 0 && deadline_limited) {
+    absolute_read_deadline_reached() = true;
+  }
+  return result;
+}
+#endif
 
 inline ssize_t select_write(socket_t sock, time_t sec, time_t usec) {
 #ifdef CPPHTTPLIB_USE_POLL
@@ -3987,6 +4110,28 @@ inline bool parse_header(const char *beg, const char *end, T fn) {
     p++;
   }
 
+#ifdef CPPHTTPLIB_RAW_HEADER_VALUES
+  const auto key_len = key_end - beg;
+  if (!key_len) { return false; }
+  const auto is_token_char = [](unsigned char c) {
+    const auto alpha_numeric =
+        (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9');
+    return alpha_numeric || c == '!' || c == '#' || c == '$' || c == '%' ||
+           c == '&' || c == '\'' || c == '*' || c == '+' || c == '-' ||
+           c == '.' || c == '^' || c == '_' || c == '`' || c == '|' ||
+           c == '~';
+  };
+  for (auto q = beg; q < key_end; ++q) {
+    if (!is_token_char(static_cast<unsigned char>(*q))) { return false; }
+  }
+  for (auto q = p; q < end; ++q) {
+    const auto c = static_cast<unsigned char>(*q);
+    if ((c < 0x20 && c != '\t') || c == 0x7f) { return false; }
+  }
+  fn(std::string(beg, key_end), std::string(p, end));
+  return true;
+#else
   if (p < end) {
     auto key_len = key_end - beg;
     if (!key_len) { return false; }
@@ -4000,15 +4145,31 @@ inline bool parse_header(const char *beg, const char *end, T fn) {
   }
 
   return false;
+#endif
 }
 
 inline bool read_headers(Stream &strm, Headers &headers) {
   const auto bufsiz = 2048;
   char buf[bufsiz];
   stream_line_reader line_reader(strm, buf, bufsiz);
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+  size_t total_header_bytes = 0;
+#endif
 
   for (;;) {
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    const auto remaining_header_bytes =
+        total_header_bytes < CPPHTTPLIB_HEADER_MAX_LENGTH
+            ? CPPHTTPLIB_HEADER_MAX_LENGTH - total_header_bytes
+            : 0;
+    if (!line_reader.getline(remaining_header_bytes)) { return false; }
+#else
     if (!line_reader.getline()) { return false; }
+#endif
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    total_header_bytes += line_reader.size();
+    if (total_header_bytes > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+#endif
 
     // Check if the line ends with CRLF.
     auto line_terminator_len = 2;
@@ -4023,7 +4184,11 @@ inline bool read_headers(Stream &strm, Headers &headers) {
     }
 #else
     } else {
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+      return false;
+#else
       continue; // Skip invalid line.
+#endif
     }
 #endif
 
@@ -4032,10 +4197,16 @@ inline bool read_headers(Stream &strm, Headers &headers) {
     // Exclude line terminator
     auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
 
-    parse_header(line_reader.ptr(), end,
-                 [&](const std::string &key, const std::string &val) {
-                   headers.emplace(key, val);
-                 });
+    const auto parsed =
+        parse_header(line_reader.ptr(), end,
+                     [&](const std::string &key, const std::string &val) {
+                       headers.emplace(key, val);
+                     });
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    if (!parsed) { return false; }
+#else
+    (void)parsed;
+#endif
   }
 
   return true;
@@ -4092,21 +4263,68 @@ inline bool read_content_without_length(Stream &strm,
 template <typename T>
 inline bool read_content_chunked(Stream &strm, T &x,
                                  ContentReceiverWithProgress out) {
+#ifdef CPPHTTPLIB_RAW_SERVER_BODY
+  (void)x;
+#endif
   const auto bufsiz = 16;
   char buf[bufsiz];
 
   stream_line_reader line_reader(strm, buf, bufsiz);
 
-  if (!line_reader.getline()) { return false; }
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+  const auto read_chunk_header_line = [&] {
+    return line_reader.getline(CPPHTTPLIB_HEADER_MAX_LENGTH);
+  };
+#else
+  const auto read_chunk_header_line = [&] { return line_reader.getline(); };
+#endif
+
+  if (!read_chunk_header_line()) { return false; }
 
   unsigned long chunk_len;
   while (true) {
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    const auto line = line_reader.ptr();
+    const auto line_size = line_reader.size();
+    if (line_size < 3 || line[line_size - 2] != '\r' ||
+        line[line_size - 1] != '\n') {
+      return false;
+    }
+    const auto syntax_end = line + line_size - 2;
+    auto cursor = line;
+    chunk_len = 0;
+    while (cursor < syntax_end) {
+      unsigned long digit = 0;
+      const auto c = static_cast<unsigned char>(*cursor);
+      if (c >= '0' && c <= '9') {
+        digit = c - '0';
+      } else if (c >= 'a' && c <= 'f') {
+        digit = c - 'a' + 10;
+      } else if (c >= 'A' && c <= 'F') {
+        digit = c - 'A' + 10;
+      } else {
+        break;
+      }
+      if (chunk_len > (ULONG_MAX - digit) / 16) { return false; }
+      chunk_len = chunk_len * 16 + digit;
+      ++cursor;
+    }
+    if (cursor == line ||
+        (cursor < syntax_end && *cursor != ';') || chunk_len == ULONG_MAX) {
+      return false;
+    }
+    for (; cursor < syntax_end; ++cursor) {
+      const auto c = static_cast<unsigned char>(*cursor);
+      if ((c < 0x20 && c != '\t') || c == 0x7f) { return false; }
+    }
+#else
     char *end_ptr;
 
     chunk_len = std::strtoul(line_reader.ptr(), &end_ptr, 16);
 
     if (end_ptr == line_reader.ptr()) { return false; }
     if (chunk_len == ULONG_MAX) { return false; }
+#endif
 
     if (chunk_len == 0) { break; }
 
@@ -4114,31 +4332,66 @@ inline bool read_content_chunked(Stream &strm, T &x,
       return false;
     }
 
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    if (!line_reader.getline(2)) { return false; }
+#else
     if (!line_reader.getline()) { return false; }
+#endif
 
     if (strcmp(line_reader.ptr(), "\r\n") != 0) { return false; }
 
-    if (!line_reader.getline()) { return false; }
+    if (!read_chunk_header_line()) { return false; }
   }
 
   assert(chunk_len == 0);
 
   // Trailer
-  if (!line_reader.getline()) { return false; }
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+  size_t trailer_bytes = 0;
+#endif
+  const auto read_trailer_line = [&] {
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    const auto remaining = trailer_bytes < CPPHTTPLIB_HEADER_MAX_LENGTH
+                               ? CPPHTTPLIB_HEADER_MAX_LENGTH - trailer_bytes
+                               : 0;
+    if (!line_reader.getline(remaining)) { return false; }
+    trailer_bytes += line_reader.size();
+    return trailer_bytes <= CPPHTTPLIB_HEADER_MAX_LENGTH;
+#else
+    return line_reader.getline();
+#endif
+  };
+  if (!read_trailer_line()) { return false; }
 
   while (strcmp(line_reader.ptr(), "\r\n") != 0) {
     if (line_reader.size() > CPPHTTPLIB_HEADER_MAX_LENGTH) { return false; }
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    if (!line_reader.end_with_crlf()) { return false; }
+#endif
 
     // Exclude line terminator
     constexpr auto line_terminator_len = 2;
     auto end = line_reader.ptr() + line_reader.size() - line_terminator_len;
 
-    parse_header(line_reader.ptr(), end,
-                 [&](const std::string &key, const std::string &val) {
-                   x.headers.emplace(key, val);
-                 });
+    const auto parsed =
+        parse_header(line_reader.ptr(), end,
+                     [&](const std::string &key, const std::string &val) {
+#ifndef CPPHTTPLIB_RAW_SERVER_BODY
+                       x.headers.emplace(key, val);
+#else
+                       // A reverse proxy must not promote request trailers
+                       // into ordinary headers (for example Authorization).
+                       (void)key;
+                       (void)val;
+#endif
+                     });
+#ifdef CPPHTTPLIB_STRICT_HEADER_PARSING
+    if (!parsed) { return false; }
+#else
+    (void)parsed;
+#endif
 
-    if (!line_reader.getline()) { return false; }
+    if (!read_trailer_line()) { return false; }
   }
 
   return true;
@@ -4215,7 +4468,9 @@ bool read_content(Stream &strm, T &x, size_t payload_max_length, int &status,
           auto len = get_header_value_u64(x.headers, "Content-Length", 0, 0);
           if (len > payload_max_length) {
             exceed_payload_max_length = true;
+#ifndef CPPHTTPLIB_REJECT_OVERSIZED_PAYLOAD_IMMEDIATELY
             skip_content_with_length(strm, len);
+#endif
             ret = false;
           } else if (len > 0) {
             ret = read_content_with_length(strm, len, std::move(progress), out);
@@ -5108,6 +5363,15 @@ inline bool expect_content(const Request &req) {
       req.method == "PRI" || req.method == "DELETE") {
     return true;
   }
+#ifdef CPPHTTPLIB_EXPECT_CONTENT_FROM_HEADERS
+  // A proxy must consume framed bodies even on methods such as GET and
+  // OPTIONS, otherwise the unread bytes can desynchronize a keep-alive
+  // connection. Application servers (including Node.js) permit such bodies.
+  if (req.has_header("Content-Length") ||
+      req.has_header("Transfer-Encoding")) {
+    return true;
+  }
+#endif
   // TODO: check if Content-Length is set
   return false;
 }
@@ -5674,7 +5938,12 @@ inline SocketStream::SocketStream(socket_t sock, time_t read_timeout_sec,
 inline SocketStream::~SocketStream() = default;
 
 inline bool SocketStream::is_readable() const {
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  return select_read_with_deadline(sock_, read_timeout_sec_,
+                                   read_timeout_usec_) > 0;
+#else
   return select_read(sock_, read_timeout_sec_, read_timeout_usec_) > 0;
+#endif
 }
 
 inline bool SocketStream::is_writable() const {
@@ -5683,6 +5952,9 @@ inline bool SocketStream::is_writable() const {
 }
 
 inline ssize_t SocketStream::read(char *ptr, size_t size) {
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  if (absolute_read_deadline_expired()) { return -1; }
+#endif
 #ifdef _WIN32
   size =
       (std::min)(size, static_cast<size_t>((std::numeric_limits<int>::max)()));
@@ -5901,6 +6173,13 @@ inline Server &Server::Get(const std::string &pattern, Handler handler) {
   return *this;
 }
 
+inline Server &Server::Get(const std::string &pattern,
+                           HandlerWithContentReader handler) {
+  get_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                std::move(handler));
+  return *this;
+}
+
 inline Server &Server::Post(const std::string &pattern, Handler handler) {
   post_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
   return *this;
@@ -5951,6 +6230,13 @@ inline Server &Server::Delete(const std::string &pattern,
 
 inline Server &Server::Options(const std::string &pattern, Handler handler) {
   options_handlers_.emplace_back(make_matcher(pattern), std::move(handler));
+  return *this;
+}
+
+inline Server &Server::Options(const std::string &pattern,
+                               HandlerWithContentReader handler) {
+  options_handlers_for_content_reader_.emplace_back(make_matcher(pattern),
+                                                    std::move(handler));
   return *this;
 }
 
@@ -6081,6 +6367,14 @@ inline Server &Server::set_read_timeout(time_t sec, time_t usec) {
   return *this;
 }
 
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+inline Server &Server::set_header_read_timeout(time_t sec, time_t usec) {
+  header_read_timeout_sec_ = sec;
+  header_read_timeout_usec_ = usec;
+  return *this;
+}
+#endif
+
 inline Server &Server::set_write_timeout(time_t sec, time_t usec) {
   write_timeout_sec_ = sec;
   write_timeout_usec_ = usec;
@@ -6126,12 +6420,26 @@ inline void Server::wait_until_ready() const {
 }
 
 inline void Server::stop() {
+#ifdef CPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS
+  const auto server_socket = svr_sock_.exchange(INVALID_SOCKET);
+  if (server_socket != INVALID_SOCKET) {
+    detail::shutdown_socket(server_socket);
+    detail::close_socket(server_socket);
+  }
+#else
   if (is_running_) {
     assert(svr_sock_ != INVALID_SOCKET);
     std::atomic<socket_t> sock(svr_sock_.exchange(INVALID_SOCKET));
     detail::shutdown_socket(sock);
     detail::close_socket(sock);
   }
+#endif
+#ifdef CPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS
+  std::lock_guard<std::mutex> lock(active_sockets_mutex_);
+  for (const auto socket : active_sockets_) {
+    detail::shutdown_socket(socket);
+  }
+#endif
 }
 
 inline bool Server::parse_request_line(const char *s, Request &req) const {
@@ -6383,7 +6691,15 @@ Server::read_content_core(Stream &strm, Request &req, Response &res,
   detail::MultipartFormDataParser multipart_form_data_parser;
   ContentReceiverWithProgress out;
 
-  if (req.is_multipart_form_data()) {
+  auto parse_multipart = req.is_multipart_form_data();
+#ifdef CPPHTTPLIB_RAW_SERVER_BODY
+  // A transport proxy must forward the original bytes and Content-Encoding;
+  // parsing multipart data or inflating content here would change what the
+  // upstream application receives.
+  parse_multipart = false;
+#endif
+
+  if (parse_multipart) {
     const auto &content_type = req.get_header_value("Content-Type");
     std::string boundary;
     if (!detail::parse_multipart_boundary(content_type, boundary)) {
@@ -6412,16 +6728,33 @@ Server::read_content_core(Stream &strm, Request &req, Response &res,
                      uint64_t /*len*/) { return receiver(buf, n); };
   }
 
+#ifdef CPPHTTPLIB_RAW_SERVER_BODY
+  if (!req.has_header("Content-Length") &&
+      !detail::is_chunked_transfer_encoding(req.headers)) {
+    return true;
+  }
+#else
   if (req.method == "DELETE" && !req.has_header("Content-Length")) {
     return true;
   }
+#endif
 
+#ifdef CPPHTTPLIB_RAW_SERVER_BODY
+  constexpr bool decompress = false;
+#else
+  constexpr bool decompress = true;
+#endif
   if (!detail::read_content(strm, req, payload_max_length_, res.status, nullptr,
-                            out, true)) {
+                            out, decompress)) {
+#ifdef CPPHTTPLIB_REJECT_OVERSIZED_PAYLOAD_IMMEDIATELY
+    if (res.status == StatusCode::PayloadTooLarge_413) {
+      req.set_header("Connection", "close");
+    }
+#endif
     return false;
   }
 
-  if (req.is_multipart_form_data()) {
+  if (parse_multipart) {
     if (!multipart_form_data_parser.is_valid()) {
       res.status = StatusCode::BadRequest_400;
       return false;
@@ -6632,7 +6965,13 @@ inline bool Server::routing(Request &req, Response &res, Stream &strm) {
                                                       std::move(receiver));
           });
 
-      if (req.method == "POST") {
+      if (req.method == "GET" || req.method == "HEAD") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                get_handlers_for_content_reader_)) {
+          return true;
+        }
+      } else if (req.method == "POST") {
         if (dispatch_request_for_content_reader(
                 req, res, std::move(reader),
                 post_handlers_for_content_reader_)) {
@@ -6654,6 +6993,12 @@ inline bool Server::routing(Request &req, Response &res, Stream &strm) {
         if (dispatch_request_for_content_reader(
                 req, res, std::move(reader),
                 delete_handlers_for_content_reader_)) {
+          return true;
+        }
+      } else if (req.method == "OPTIONS") {
+        if (dispatch_request_for_content_reader(
+                req, res, std::move(reader),
+                options_handlers_for_content_reader_)) {
           return true;
         }
       }
@@ -6824,14 +7169,37 @@ Server::process_request(Stream &strm, bool close_connection,
 
   detail::stream_line_reader line_reader(strm, buf.data(), buf.size());
 
-  // Connection has been closed on client
-  if (!line_reader.getline()) { return false; }
-
   Request req;
 
   Response res;
   res.version = "HTTP/1.1";
   res.headers = default_headers_;
+
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  const auto header_timeout =
+      std::chrono::seconds(header_read_timeout_sec_) +
+      std::chrono::microseconds(header_read_timeout_usec_);
+  detail::scoped_read_deadline header_deadline(
+      std::chrono::steady_clock::now() + header_timeout);
+#endif
+
+  // Connection has been closed on client. Bound the unfinished line while it
+  // is being read, not only after its terminating newline arrives.
+  if (!line_reader.getline(CPPHTTPLIB_REQUEST_URI_MAX_LENGTH)) {
+    if (line_reader.size() > CPPHTTPLIB_REQUEST_URI_MAX_LENGTH) {
+      connection_closed = true;
+      res.status = StatusCode::UriTooLong_414;
+      return write_response(strm, true, req, res);
+    }
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+    if (detail::absolute_read_deadline_expired()) {
+      connection_closed = true;
+      res.status = StatusCode::RequestTimeout_408;
+      return write_response(strm, true, req, res);
+    }
+#endif
+    return false;
+  }
 
 #ifdef _WIN32
   // TODO: Increase FD_SETSIZE statically (libzmq), dynamically (MySQL).
@@ -6849,18 +7217,75 @@ Server::process_request(Stream &strm, bool close_connection,
 
   // Check if the request URI doesn't exceed the limit
   if (line_reader.size() > CPPHTTPLIB_REQUEST_URI_MAX_LENGTH) {
-    Headers dummy;
-    detail::read_headers(strm, dummy);
+    connection_closed = true;
     res.status = StatusCode::UriTooLong_414;
-    return write_response(strm, close_connection, req, res);
+    return write_response(strm, true, req, res);
   }
 
   // Request line and headers
   if (!parse_request_line(line_reader.ptr(), req) ||
       !detail::read_headers(strm, req.headers)) {
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+    res.status = detail::absolute_read_deadline_expired()
+                     ? StatusCode::RequestTimeout_408
+                     : StatusCode::BadRequest_400;
+#else
     res.status = StatusCode::BadRequest_400;
+#endif
+#ifdef CPPHTTPLIB_STRICT_REQUEST_FRAMING
+    connection_closed = true;
+    return write_response(strm, true, req, res);
+#else
     return write_response(strm, close_connection, req, res);
+#endif
   }
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  header_deadline.release();
+#endif
+
+#ifdef CPPHTTPLIB_STRICT_REQUEST_FRAMING
+  // Match the strict framing accepted by modern Node.js and never normalize
+  // an ambiguous request before forwarding it to another HTTP parser.
+  const auto content_length_count = req.get_header_value_count("Content-Length");
+  const auto transfer_encoding_count =
+      req.get_header_value_count("Transfer-Encoding");
+  const auto host_count = req.get_header_value_count("Host");
+  auto invalid_framing = content_length_count > 1 ||
+                         transfer_encoding_count > 1 ||
+                         (content_length_count > 0 &&
+                          transfer_encoding_count > 0) ||
+                         (req.version == "HTTP/1.1" &&
+                          (host_count != 1 ||
+                           req.get_header_value("Host").empty()));
+
+  if (content_length_count == 1) {
+    const auto value = req.get_header_value("Content-Length");
+    uint64_t parsed = 0;
+    if (value.empty()) {
+      invalid_framing = true;
+    } else {
+      for (const unsigned char c : value) {
+        if (c < '0' || c > '9' ||
+            parsed > ((std::numeric_limits<uint64_t>::max)() - (c - '0')) /
+                         10) {
+          invalid_framing = true;
+          break;
+        }
+        parsed = parsed * 10 + (c - '0');
+      }
+    }
+  }
+  if (transfer_encoding_count == 1 &&
+      !detail::compare_case_ignore(
+          req.get_header_value("Transfer-Encoding"), "chunked")) {
+    invalid_framing = true;
+  }
+  if (invalid_framing) {
+    connection_closed = true;
+    res.status = StatusCode::BadRequest_400;
+    return write_response(strm, true, req, res);
+  }
+#endif
 
   if (req.get_header_value("Connection") == "close") {
     connection_closed = true;
@@ -6879,6 +7304,7 @@ Server::process_request(Stream &strm, bool close_connection,
   req.set_header("LOCAL_ADDR", req.local_addr);
   req.set_header("LOCAL_PORT", std::to_string(req.local_port));
 
+#ifndef CPPHTTPLIB_DISABLE_SERVER_RANGE
   if (req.has_header("Range")) {
     const auto &range_header_value = req.get_header_value("Range");
     if (!detail::parse_range_header(range_header_value, req.ranges)) {
@@ -6886,6 +7312,7 @@ Server::process_request(Stream &strm, bool close_connection,
       return write_response(strm, close_connection, req, res);
     }
   }
+#endif
 
   if (setup_request) { setup_request(req); }
 
@@ -6940,6 +7367,11 @@ Server::process_request(Stream &strm, bool close_connection,
     }
   }
 #endif
+#ifdef CPPHTTPLIB_REJECT_OVERSIZED_PAYLOAD_IMMEDIATELY
+  if (req.get_header_value("Connection") == "close") {
+    connection_closed = true;
+  }
+#endif
   if (routed) {
     if (res.status == -1) {
       res.status = req.ranges.empty() ? StatusCode::OK_200
@@ -6965,6 +7397,17 @@ Server::process_request(Stream &strm, bool close_connection,
 inline bool Server::is_valid() const { return true; }
 
 inline bool Server::process_and_close_socket(socket_t sock) {
+#ifdef CPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS
+  {
+    std::lock_guard<std::mutex> lock(active_sockets_mutex_);
+    active_sockets_.insert(sock);
+    if (svr_sock_ == INVALID_SOCKET) { detail::shutdown_socket(sock); }
+  }
+  auto remove_active_socket = detail::scope_exit([&]() {
+    std::lock_guard<std::mutex> lock(active_sockets_mutex_);
+    active_sockets_.erase(sock);
+  });
+#endif
   auto ret = detail::process_server_socket(
       svr_sock_, sock, keep_alive_max_count_, keep_alive_timeout_sec_,
       read_timeout_sec_, read_timeout_usec_, write_timeout_sec_,
@@ -6974,6 +7417,13 @@ inline bool Server::process_and_close_socket(socket_t sock) {
                                nullptr);
       });
 
+#ifdef CPPHTTPLIB_STOP_CLOSES_ACTIVE_SOCKETS
+  {
+    std::lock_guard<std::mutex> lock(active_sockets_mutex_);
+    active_sockets_.erase(sock);
+  }
+  remove_active_socket.release();
+#endif
   detail::shutdown_socket(sock);
   detail::close_socket(sock);
   return ret;
@@ -7455,10 +7905,12 @@ inline bool ClientImpl::write_request(Stream &strm, Request &req,
         }
       }
     } else {
+#ifndef CPPHTTPLIB_NO_AUTOMATIC_ZERO_CONTENT_LENGTH
       if (req.method == "POST" || req.method == "PUT" ||
           req.method == "PATCH") {
         req.set_header("Content-Length", "0");
       }
+#endif
     }
   } else {
     if (!req.has_header("Content-Type")) {
@@ -8677,7 +9129,12 @@ inline SSLSocketStream::SSLSocketStream(socket_t sock, SSL *ssl,
 inline SSLSocketStream::~SSLSocketStream() = default;
 
 inline bool SSLSocketStream::is_readable() const {
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  return detail::select_read_with_deadline(sock_, read_timeout_sec_,
+                                           read_timeout_usec_) > 0;
+#else
   return detail::select_read(sock_, read_timeout_sec_, read_timeout_usec_) > 0;
+#endif
 }
 
 inline bool SSLSocketStream::is_writable() const {
@@ -8686,6 +9143,9 @@ inline bool SSLSocketStream::is_writable() const {
 }
 
 inline ssize_t SSLSocketStream::read(char *ptr, size_t size) {
+#ifdef CPPHTTPLIB_ABSOLUTE_READ_DEADLINE
+  if (detail::absolute_read_deadline_expired()) { return -1; }
+#endif
   if (SSL_pending(ssl_) > 0) {
     return SSL_read(ssl_, ptr, static_cast<int>(size));
   } else if (is_readable()) {

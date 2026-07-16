@@ -79,7 +79,10 @@ const loginAttempts = new Map(); // key -> { fails, firstAt, lockedUntil }
 function loginRateKey(req) {
   // プロキシ配下では X-Forwarded-For の先頭が実 IP。無ければ接続元。
   const fwd = (req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  return fwd || req.socket?.remoteAddress || "unknown";
+  const gatewayIp = process.env.AIHELPER_CPP_GATEWAY === "1"
+    ? String(req.headers["x-aihelper-gateway-client-ip"] || "").trim()
+    : "";
+  return fwd || gatewayIp || req.socket?.remoteAddress || "unknown";
 }
 
 // true を返したらブロック（レスポンスは呼び出し側で返す）。

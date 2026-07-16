@@ -1,9 +1,13 @@
-# AIHelper.jp サーバー兼ウェブアプリ (Node.js + Express + MySQL)
+# AIHelper.jp サーバー兼ウェブアプリ (C++ HTTP + Node.js / Express + MySQL)
 
 文字起こしアプリから送られてくるテキストを受け取り **MySQL に保存**し、
 **Gemini** で「課題」「予定」「要約」を抽出する。締切が近づくと **LINE** と
 **端末ローカル通知**で警告し、その日の出来事を**日次要約**にまとめ、
 **AIチャット**で質問応答・予定登録までこなす。ブラウザ（`/`）がダッシュボード。
+
+公開ポートへの HTTP リクエストは C++ ゲートウェイが受け、ループバックで待ち受ける
+Node.js / Express へ転送する。APIルート、レスポンス、定期処理、`dashboard.js` が生成する
+ブラウザUIは従来どおり Node.js 側にあり、外部から見えるURLや挙動は変わらない。
 
 ## できること
 
@@ -21,7 +25,7 @@
 
 ```bash
 cd server
-make install       # Node.js + MySQL 導入 → DB/専用ユーザー作成 → schema 適用 → npm ci (sudo 使用)
+make install       # C++/Node.js/MySQL 導入 → DB作成 → npm ci → C++ビルド (sudo 使用)
 make run           # http://localhost:3000
 
 # パスワード等は変数で上書き可
@@ -30,7 +34,9 @@ make run LINE_CHANNEL_ACCESS_TOKEN=yyy
 ```
 
 `make install` は Node が接続する専用ユーザー（既定 `aihelper`/`aihelper`）を作成し、
-`make run` はその認証情報を環境変数で Node に渡す。`make help` で全ターゲットを表示。
+C++ ゲートウェイもビルドする。`make run` はゲートウェイを公開ポートで起動し、内部の
+Node.js プロセスも管理する。`make build` は C++ だけを再ビルドし、`make test` は HTTP
+互換テストを実行する。`make help` で全ターゲットを表示。
 
 ### 手動で行う場合
 
@@ -41,9 +47,13 @@ npm install
 # DB を用意（schema.sql で AIHelper DB と各テーブルを作成）
 mysql -u root < schema.sql
 
-# 起動
-npm start          # http://localhost:3000
+# C++ ゲートウェイをビルドして起動
+make build
+make run           # http://localhost:3000
 ```
+
+`npm start` は Node.js 側だけを確認するための開発用起動で、通常の公開サーバー起動には
+C++ ゲートウェイを含む `make run` を使う。
 
 接続情報・連携キーは環境変数で渡す。
 
@@ -54,7 +64,7 @@ npm start          # http://localhost:3000
 | `DB_USER` | `root` | ユーザー |
 | `DB_PASSWORD` | （空） | パスワード |
 | `DB_NAME` | `AIHelper` | データベース名 |
-| `PORT` | `3000` | サーバーの待受ポート |
+| `PORT` | `3000` | C++ HTTP ゲートウェイの公開待受ポート |
 | `GEMINI_MODEL` | `gemini-2.5-flash-lite` | 使用する Gemini モデル（サーバー共通） |
 | `LINE_CHANNEL_ACCESS_TOKEN` | （空） | LINE Messaging API のチャネルアクセストークン。未設定なら LINE 送信はスキップ |
 | `REMINDER_INTERVAL_SEC` | `60` | 締切チェックの間隔（秒） |
@@ -102,7 +112,7 @@ Web の Google 連携を有効にするには、Google Cloud Console で「OAuth
 # フル機能で起動する例
 DB_USER=root DB_PASSWORD=secret \
 LINE_CHANNEL_ACCESS_TOKEN=yyyyyyyy \
-npm start
+make run
 ```
 
 ### Gemini API キー（ユーザーごとの登録制）
