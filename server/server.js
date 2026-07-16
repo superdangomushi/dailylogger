@@ -109,6 +109,15 @@ const heavyLimiter = rateLimit({
   keyPrefix: "heavy",
   keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || req.ip || req.socket.remoteAddress || ""),
 });
+// AIチャット専用の枠。heavyLimiter を使うと、録音中の端末が5分おきに再送する
+// 音声/文字起こしアップロードと同じ枠を食い合い、未送信が溜まった端末では
+// チャットが常時 429 になる（アップロード側も 429 で失敗し続けるため永久に回復しない）。
+const askLimiter = rateLimit({
+  windowMs: 60 * 60_000,
+  max: 60,
+  keyPrefix: "ask",
+  keyOf: (req) => String(req.get("X-Account-Email") || req.body?.email || req.ip || req.socket.remoteAddress || ""),
+});
 
 app.use(express.json({ limit: "10mb" }));
 app.use(express.text({ type: "text/plain", limit: "10mb" }));
@@ -1439,7 +1448,7 @@ app.get("/api/transcripts/:id", async (req, res) => {
 
 // POST /api/ask  body: { email, token, question }
 // 質問に答え、依頼（予定追加・完了化）なら実行する。
-app.post("/api/ask", heavyLimiter, async (req, res) => {
+app.post("/api/ask", askLimiter, async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
   if (!(await gemini.isConfiguredFor(account.email))) {
@@ -1583,11 +1592,14 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
       }
     }
 
-    // Gemini が reply では「登録した」と言いつつ actions を返し忘れることがある。
+    // Gemini が reply では「登録した/します」と言いつつ actions を返し忘れることがある。
     // その場合は依頼内容を専用プロンプトで抽出し直して登録する（保険）。
+    // 返答の言い回し（未来形「登録しますね」等も含む）か、発話自体が追加依頼の形
+    // （「〜入れといて」「〜登録して」等）のどちらかに該当したら発動する。
     let reply = result.reply;
-    const claimsAdd = /(登録|追加)(し|いたし)ました|入れ(て|と)おきました|入れました/.test(reply);
-    if (claimsAdd && !applied.some((x) => x.op === "add_task")) {
+    const claimsAdd = /(登録|追加)(し|いたし)(ました|ます|とき|とく|ておき)|入れ(て|と)(おき|き)?ま(した|す)|入れました/.test(reply);
+    const asksAdd = /(入れて|入れといて|入れとって|入れておいて|(追加|登録)し(て|といて|ておいて)|リマインドして)/.test(question);
+    if ((claimsAdd || asksAdd) && !applied.some((x) => x.op === "add_task")) {
       try {
         const fallback = await gemini.extractTaskRequests(account.email, question);
         for (const t of fallback) {
@@ -1597,7 +1609,13 @@ app.post("/api/ask", heavyLimiter, async (req, res) => {
             addedYotei.push({ title: t.content, deadline_at: t.deadline_at, date_only: !!t.date_only });
           }
         }
-        if (!fallback.length) {
+        // アプリは reply の文面しか表示しないため、保険側で登録した内容は返信に明示する。
+        if (fallback.length && !claimsAdd) {
+          reply += `\n（${fallback.map((t) => `「${t.content}」`).join("・")}を登録しました）`;
+        }
+        // 発話側の判定（asksAdd）は誤検知がありうるので、お詫びは
+        // AI自身が「登録した」と言った（claimsAdd）のに登録できなかった場合だけ付ける。
+        if (!fallback.length && claimsAdd) {
           reply += "\n（※すみません、今回は登録できていません。「〇月〇日に△△を予定に入れて」の形でもう一度お願いします）";
         }
       } catch (e) {
