@@ -132,16 +132,18 @@ npm start                                   # http://localhost:3000
 
 ## ローカルPCワーカー（音声文字起こし）
 
-`client/`（Node.js + faster-whisper）。公開サーバーへ10秒ごとにポーリングし、
+`client/`（C++ + faster-whisper）。公開サーバーへ10秒ごとにポーリングし、
 自分と同じ `email + token` の音声ジョブだけをダウンロードして文字起こしし、テキストをサーバーへ返す。
+通信・ローカル管理UIは C++（単一バイナリ `audio-worker`）、音声認識は従来どおり Python（faster-whisper）。
 
 詳細は **[client/README.md](client/README.md)** を参照。
 
 ```bash
 cd client
-make stt-deps
+make build      # C++ワーカーのビルド（要 g++ / libssl-dev）
+make stt-deps   # faster-whisper のセットアップ
 
-npm start
+make run
 ```
 
 起動後に `http://127.0.0.1:39123` を開き、公開サーバーURLと処理したいアカウントのメール・パスワードを登録する。

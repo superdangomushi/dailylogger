@@ -15,7 +15,7 @@
                                     └──────────┬────────────┘
 ┌──────────────────────┐   JSONでやり取り       │
 │ ワーカーPC (client/)  │ ←────────────────────┘
-│ audio-worker.js       │   claim / download / result
+│ audio-worker (C++)    │   claim / download / result
 │ + faster-whisper      │   （04-worker-protocol.md 参照）
 └──────────────────────┘
 ```

@@ -2,7 +2,7 @@
 //
 // 端末は音声(WAV等)を POST /api/audio へアップロードするだけ:
 //   1. アップロードを uploads/audio/ に保存し、audio_jobs に queued で登録
-//   2. ローカルPCの client/audio-worker.js が10秒ごとに
+//   2. ローカルPCの client/audio-worker（C++ワーカー）が10秒ごとに
 //      claim → download → Whisper 処理 → result 送信する
 //   3. 文字起こし結果は従来のテキストアップロードと同じ流れ
 //      （transcripts 保存 → 課題/予定の抽出(Gemini) → tasks 登録）に乗せる
@@ -210,7 +210,7 @@ function start() {
       .catch(() => {}),
     60_000
   );
-  console.log("音声文字起こしは client/audio-worker.js からの外部PC処理待ちです");
+  console.log("音声文字起こしは client/audio-worker（外部PCのC++ワーカー）の処理待ちです");
 }
 
 module.exports = {

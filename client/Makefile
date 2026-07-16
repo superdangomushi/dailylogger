@@ -1,35 +1,47 @@
-# aihelper local audio worker (Node.js + faster-whisper) Makefile
+# aihelper local audio worker (C++ + faster-whisper) Makefile
 # Expected environment: each user's local Ubuntu PC.
+#
+# The worker binary itself is C++ (communication / local UI / process control).
+# Speech recognition stays in Python (stt/transcribe.py, faster-whisper).
 
-NODE_MAJOR ?= 20
+CXX ?= g++
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
+CPPFLAGS = -Icpp/third_party -DCPPHTTPLIB_OPENSSL_SUPPORT
+LDLIBS = -lssl -lcrypto -pthread
+
+BIN = audio-worker
+SRCS = cpp/src/main.cpp
+HDRS = $(wildcard cpp/src/*.hpp) cpp/third_party/httplib.h cpp/third_party/json.hpp
 
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps npm-deps stt-deps gpu-driver gpu-check run clean
+.PHONY: help install system-deps build stt-deps gpu-driver gpu-check run clean
 
 help:
 	@echo "aihelper local audio worker Makefile"
 	@echo ""
-	@echo "  make install       Node.js + ffmpeg + faster-whisper setup (sudo used)"
+	@echo "  make install       C++ build tools + ffmpeg + faster-whisper setup (sudo used)"
+	@echo "  make build         Build the C++ worker binary ($(BIN))"
 	@echo "  make run           Start the polling audio worker"
-	@echo "  make system-deps   Install Node.js $(NODE_MAJOR).x, Python venv, and ffmpeg (sudo)"
-	@echo "  make npm-deps      Install Node dependencies"
+	@echo "  make system-deps   Install g++, OpenSSL headers, Python venv, and ffmpeg (sudo)"
 	@echo "  make stt-deps      Install faster-whisper into stt/.venv (sudo)"
 	@echo "  make gpu-driver    Install NVIDIA driver when needed (sudo; reboot required)"
 	@echo "  make gpu-check     Check whether faster-whisper can see CUDA"
-	@echo "  make clean         Remove node_modules, worker-audio, and stt/.venv"
+	@echo "  make clean         Remove the binary, worker-audio, and stt/.venv"
 
-install: system-deps npm-deps stt-deps
+install: system-deps build stt-deps
 	@echo ""
 	@echo "Setup complete. Run 'make run' and open the local UI to add accounts."
 
 system-deps:
-	@echo ">> Installing Node.js $(NODE_MAJOR).x, python3-venv, and ffmpeg"
-	curl -fsSL https://deb.nodesource.com/setup_$(NODE_MAJOR).x | sudo -E bash -
-	sudo apt-get install -y nodejs python3-venv ffmpeg
-	@echo ">> Node: $$(node -v) / npm: $$(npm -v)"
+	@echo ">> Installing g++, libssl-dev, python3-venv, and ffmpeg"
+	sudo apt-get update
+	sudo apt-get install -y g++ make libssl-dev python3-venv ffmpeg
+	@echo ">> g++: $$(g++ --version | head -n1)"
 
-npm-deps:
-	npm install
+$(BIN): $(SRCS) $(HDRS)
+	$(CXX) $(CXXFLAGS) $(CPPFLAGS) -o $(BIN) $(SRCS) $(LDLIBS)
+
+build: $(BIN)
 
 # Audio transcription runs on the user's local PC. CUDA Toolkit is not required
 # system-wide; cuBLAS/cuDNN are installed inside the venv by pip packages.
@@ -61,8 +73,8 @@ gpu-check:
 	  echo "stt/.venv is not ready yet. Run 'make stt-deps' first."; \
 	fi
 
-run:
-	npm start
+run: $(BIN)
+	./$(BIN)
 
 clean:
-	rm -rf node_modules worker-audio stt/.venv
+	rm -rf $(BIN) worker-audio stt/.venv

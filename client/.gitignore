@@ -1,4 +1,4 @@
-node_modules/
+/audio-worker
 worker-audio/
 stt/.venv/
 accounts.json

@@ -100,5 +100,5 @@ JS関数はすべて `renderDashboard()` 内の `<script>` にある。
 ## ワーカーPC側のローカル管理UI
 
 ダッシュボードとは別に、ワーカーPC上にも管理UI（http://127.0.0.1:39123）がある。
-こちらのコードは `client/audio-worker.js` の `htmlPage()`。詳細は
+こちらのコードは `client/cpp/src/ui_html.hpp`（C++ワーカーが配信）。詳細は
 [03-client-code-map.md](03-client-code-map.md) の「ローカル管理UI」を参照。

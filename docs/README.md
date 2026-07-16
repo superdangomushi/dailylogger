@@ -12,7 +12,7 @@
 | --- | --- |
 | [01-architecture.md](01-architecture.md) | 全体構成。登場人物（サーバー / ワーカーPC / スマホアプリ / ブラウザ）と音声が文字になるまでの流れ |
 | [02-server-code-map.md](02-server-code-map.md) | `server/` の各ファイルの役割と、`server.js`（3600行）のどこに何が書いてあるかの地図 |
-| [03-client-code-map.md](03-client-code-map.md) | `client/audio-worker.js`（ワーカーPC側）の構造、設定ファイル `accounts.json`、ローカル管理UI |
+| [03-client-code-map.md](03-client-code-map.md) | `client/`（ワーカーPC側・C++）の構造、設定ファイル `accounts.json`、ローカル管理UI |
 | [04-worker-protocol.md](04-worker-protocol.md) | **音声ワーカーのJSONプロトコル詳細**。登録フェーズ・claim・ダウンロード・結果送信を全JSON例つきで。なりすまし/取違対策の仕組みも |
 | [05-api-reference.md](05-api-reference.md) | 全APIエンドポイントのリファレンス（リクエスト/レスポンスのJSON例つき） |
 | [06-database.md](06-database.md) | MySQLの全テーブルスキーマとカラムの意味 |

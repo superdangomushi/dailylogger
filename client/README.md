@@ -6,6 +6,11 @@ for every enabled account configured in the local UI, downloads matching jobs,
 transcribes them locally with faster-whisper, and posts the text back to the
 server.
 
+The worker itself is a single C++ binary (`audio-worker`): all networking,
+the polling loop, metrics reporting, and the local management UI are C++.
+Speech recognition stays in Python (`stt/transcribe.py`, faster-whisper),
+launched as a child process per job.
+
 ## Setup
 
 ```bash
@@ -13,15 +18,21 @@ cd client
 make install
 ```
 
-If Node.js is already installed, `make stt-deps` is enough for the Whisper side.
+`make install` = `system-deps` (g++, libssl-dev, python3-venv, ffmpeg) +
+`build` (compiles `audio-worker`) + `stt-deps` (faster-whisper venv).
+If build tools are already installed, `make build && make stt-deps` is enough.
 GPU use is automatic when faster-whisper can see CUDA. If `gpu-check` says CUDA
 is not visible, CPU transcription still works.
+
+Third-party C++ dependencies ([cpp-httplib](https://github.com/yhirose/cpp-httplib)
+and [nlohmann/json](https://github.com/nlohmann/json), both MIT) are vendored in
+`cpp/third_party/`, so no extra package is needed beyond OpenSSL headers.
 
 ## Run
 
 ```bash
 cd client
-npm start
+make run        # = ./audio-worker
 ```
 
 Then open the local UI:
@@ -42,7 +53,7 @@ The worker polls every enabled account every 10 seconds by default. Change it
 with:
 
 ```bash
-AUDIO_WORKER_POLL_SEC=5 npm start
+AUDIO_WORKER_POLL_SEC=5 ./audio-worker
 ```
 
 ## Environment Variables
@@ -56,6 +67,7 @@ AUDIO_WORKER_POLL_SEC=5 npm start
 | `AIHELPER_EMAIL` | empty | Optional single legacy account email |
 | `AIHELPER_TOKEN` | empty | Optional single legacy account token |
 | `AUDIO_WORKER_POLL_SEC` | `10` | Polling interval in seconds |
+| `AUDIO_WORKER_METRICS_SEC` | `3` | Metrics reporting interval in seconds |
 | `AUDIO_WORKER_DIR` | `client/worker-audio` | Temporary audio download directory |
 | `WHISPER_DEVICE` | auto | `cuda` or `cpu` override |
 | `WHISPER_MODEL` | GPU: `large-v3`, CPU: `large-v3-turbo` | faster-whisper model |
@@ -63,6 +75,9 @@ AUDIO_WORKER_POLL_SEC=5 npm start
 | `WHISPER_BATCH` | GPU: `16`, CPU: `0` | Batch size. `0` disables batched inference |
 | `WHISPER_CPU_THREADS` | all cores | CPU thread count |
 | `WHISPER_PYTHON` | `stt/.venv/bin/python3` | Custom Python executable |
+
+Paths default relative to the directory containing the `audio-worker` binary
+(normally `client/`).
 
 ## Flow
 
