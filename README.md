@@ -1,4 +1,4 @@
-# ishilab_zemi 
+# dailylogger 
 
 ## 何か変更したら必ずdocsに記入しよう！！
 
