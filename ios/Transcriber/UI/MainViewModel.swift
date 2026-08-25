@@ -84,6 +84,11 @@ struct UiState {
     var sttQualityBusy = false
     var sttQualityMessage: String? = nil
 
+    // Gemini 解析の最小間隔（サーバー設定）
+    var geminiIntervalMin = 60
+    var geminiIntervalBusy = false
+    var geminiIntervalMessage: String? = nil
+
     var anyModelReady: Bool { !downloadedModels.isEmpty }
     var googleConnected: Bool { !googleEmails.isEmpty }
 }
@@ -112,6 +117,7 @@ final class MainViewModel: ObservableObject {
             loadServerTranscripts()
             loadChatHistory()
             loadSttQuality()
+            loadGeminiInterval()
         }
     }
 
@@ -303,6 +309,7 @@ final class MainViewModel: ObservableObject {
                 loadChatHistory()
                 loadMoodle()
                 loadSttQuality()
+                loadGeminiInterval()
                 refreshGoogle()
             case .failure(let e):
                 ui.loginInProgress = false
@@ -325,6 +332,8 @@ final class MainViewModel: ObservableObject {
         ui.summaryError = nil
         ui.sttQuality = "high"
         ui.sttQualityMessage = nil
+        ui.geminiIntervalMin = 60
+        ui.geminiIntervalMessage = nil
         ui.serverTranscripts = []
         ui.serverTranscriptsLoading = false
         ui.serverTranscriptsError = nil
@@ -856,6 +865,38 @@ final class MainViewModel: ObservableObject {
                 ui.sttQualityBusy = false
                 ui.sttQuality = prev
                 ui.sttQualityMessage = message
+            }
+        }
+    }
+
+    /// Gemini 解析の最小間隔をサーバーから取得。
+    func loadGeminiInterval() {
+        guard accountStore.loggedIn else { return }
+        let (client, base, email, token) = context()
+        _Concurrency.Task {
+            let r = await run { client.fetchGeminiInterval(baseUrl: base, email: email, token: token) }
+            if case .success(let min) = r { ui.geminiIntervalMin = min }
+        }
+    }
+
+    /// Gemini 解析の最小間隔をサーバーへ保存する。
+    func setGeminiInterval(_ minutes: Int) {
+        guard accountStore.loggedIn, !ui.geminiIntervalBusy else { return }
+        let prev = ui.geminiIntervalMin
+        ui.geminiIntervalMin = minutes
+        ui.geminiIntervalBusy = true
+        ui.geminiIntervalMessage = nil
+        let (client, base, email, token) = context()
+        _Concurrency.Task {
+            let result = await run { client.saveGeminiInterval(baseUrl: base, email: email, token: token, minutes: minutes) }
+            switch result {
+            case .ok:
+                ui.geminiIntervalBusy = false
+                ui.geminiIntervalMessage = "保存しました"
+            case .error(let message):
+                ui.geminiIntervalBusy = false
+                ui.geminiIntervalMin = prev
+                ui.geminiIntervalMessage = message
             }
         }
     }
