@@ -53,9 +53,9 @@
   - サーバー文字起こしモードでは音声を `/api/audio` へ送信し、ローカルPCワーカーが処理
   - 送信できなかった音声は `audio-outbox` に残し、次回同期で再送
   - 簡易VADでほぼ無音のチャンクはスキップし負荷を軽減
-  - オーナー音声を12秒登録すると、端末文字起こしを10秒窓で照合して
-    `[オーナー]` / `[他人]`（音声不足時は `[話者不明]`）のラベルを付ける
-  - 登録音声は保存せず、MFCCベースの声紋特徴だけを端末のバックアップ対象外領域に保持
+  - オーナー音声の登録では12秒のWAVを送るだけで、スマホ内で声紋計算は行わない
+  - `client/` のPCワーカーがSpeechBrain ECAPAで声紋を作成・照合し、
+    PCクライアント文字起こしへ `[オーナー]` / `[他人]` を付ける
   - 画面OFFでも継続するため PARTIAL_WAKE_LOCK を保持
 - **BackgroundSync**（サービスと一緒に起動）
   - ログイン済みのとき、完了テキストを `POST /api/upload`、未送信音声を `POST /api/audio` に送信
@@ -76,8 +76,8 @@
 | 録音/文字起こしサービス | `app/.../service/AudioCaptureService.kt` |
 | 通知制御の受信 | `app/.../service/MicControlReceiver.kt` |
 | チャンク化・簡易VAD | `app/.../audio/AudioChunker.kt` |
-| オーナー声紋の抽出・保存・照合 | `app/.../speaker/OwnerVoiceProfile.kt` |
-| 声紋登録用の短時間録音 | `app/.../speaker/OwnerVoiceEnrollmentRecorder.kt` |
+| オーナー声登録用の短時間録音 | `app/.../speaker/OwnerVoiceEnrollmentRecorder.kt` |
+| 登録WAV送信・状態取得 | `app/.../net/AiHelperClient.kt`, `app/.../ui/MainViewModel.kt` |
 | whisper エンジン / 抽象 | `app/.../transcribe/WhisperEngine.kt`, `TranscriptionEngine.kt` |
 | 出力ファイル管理 | `app/.../transcribe/TranscriptStore.kt` |
 | モデルDL管理 | `app/.../model/ModelManager.kt` |
@@ -104,7 +104,7 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 2. 初回はモデルをダウンロード（日本語は base 以上を推奨）
 3. 「moneybot.jp 連携」でサーバーURL・アカウント・トークンを入力しログイン
 4. 「録音開始」→ 通知が常駐し、端末文字起こしテキストまたはサーバー文字起こし用の音声が自動送信される
-5. 話者を識別する場合は、録音停止中に「オーナーの声」→「声を登録」で12秒間読み上げる
+5. 話者を識別する場合はPCクライアントを起動し、録音停止中に「オーナーの声」→「声を登録」で12秒間読み上げる。以後は「PCクライアントで処理」で録音する
 6. 締切が近づくとリマインド通知が届く。「AIに聞く / 頼む」から質問・依頼もできる
 7. マイクを一時的に手放したいときは通知の「一時停止」、戻すときは「再開」
 
