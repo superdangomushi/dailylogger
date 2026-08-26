@@ -1,6 +1,7 @@
 /audio-worker
 worker-audio/
 stt/.venv/
+llm/.venv/
 accounts.json
 accounts.json.tmp
 *.log

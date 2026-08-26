@@ -89,3 +89,35 @@ Gemini は `needFiles`（読みたいファイル名）を返せる。その場�
 - 登録済みキーが失効した場合（Google側で削除等）は `handleBadGeminiKey()` が
   「登録し直してください」という導線付き400を返す
 - 解析の失敗は文字起こし保存自体には影響しない（ログに残して続行）
+
+## ローカルLLM(Ollama)経由の解析（Gemini代替）
+
+Gemini APIキーを登録していないユーザー向けに、**手元の PC の Ollama で解析する経路**を用意している
+（[client/llm/README.md](../client/llm/README.md)）。対象は `analyze`（課題/予定抽出＋要約）と
+日次要約のみ。AIチャット(`/api/ask`)は対象外（従来どおり Gemini）。
+
+設計の要は「**プロンプト組み立て・正規化・DB保存はサーバーに集約し、クライアントは LLM 実行だけ**」:
+
+```
+client/llm/analyzer.py（Ollama を叩くだけの薄い Python ワーカー）
+  ├─ POST /api/llm/analyze/claim
+  │    └─ db.claimUnanalyzedTranscript()  … 未解析(analyzed_at IS NULL)を原子的に1件確保
+  │       サーバーは gemini.buildAnalyzePrompt(content, today) と ANALYZE_SCHEMA を返す
+  ├─ Ollama /api/generate（prompt + format=ANALYZE_SCHEMA で構造化JSON出力）
+  └─ POST /api/llm/analyze/result { transcriptId, output }
+       ├─ JSON.parse(output)
+       ├─ gemini.normalizeAnalysisResult()  … Gemini版と同じ正規化（normalizeDeadline 等）
+       └─ applyAnalysisResult()             … saveAnalysis + upsertTasks + applyTaskUpdates + cancelTasks
+```
+
+- `applyAnalysisResult(email, transcriptId, result)` は `runAnalysisPipeline()` から切り出した
+  **保存専用の共通関数**。Gemini経路（`gemini.analyze` → applyAnalysisResult）とローカルLLM経路
+  （Ollama出力を normalize → applyAnalysisResult）の両方が同じ保存処理を通る。
+- `gemini.js` は `buildAnalyzePrompt` / `buildDailySummaryPrompt` / `ANALYZE_SCHEMA` /
+  `normalizeAnalysisResult` / `normalizeDeadline` を export し、Gemini呼び出しと分離した「プロンプトと
+  正規化の資産」をローカルLLM経路と共有する（プロンプト文面や日時正規化を二重実装しない）。
+- 排他: `transcripts.analysis_claimed_at` の原子的更新（`claimNextAudioJob` と同じ `LAST_INSERT_ID(id)`
+  トリック）で二重処理を防ぐ。失敗時は `releaseTranscriptClaim()` でロックを外して再claim可能にする。
+- 日次要約: `db.claimDailySummaryWork(email, day)` が「その日の文字起こしがあり、要約が未生成 or
+  最新の文字起こしより古い」ときだけ材料を返す。二重生成は `saveDailySummary` の upsert で吸収。
+- 認証は音声workerと同じ JSON ボディの `auth`(email+token)（`authFromJsonBody`）。UUID登録は不要。

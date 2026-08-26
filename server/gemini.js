@@ -235,16 +235,14 @@ function buildAnalyzePrompt(content, today) {
   ].join("\n");
 }
 
-// 文字起こしを解析して { kadai[], yotei[], tasks[], cancellations[], updates[], summary } を返す。
-// kadai/yotei は後方互換（{deadline,content,details}）、tasks は正規化済み（deadline_at 付き）。
-async function analyze(email, content, opts = {}) {
-  const apiKey = await requireApiKey(email);
-  const today = opts.today || localDate();
-  const parsed = await callJson(apiKey, buildAnalyzePrompt(content, today), ANALYZE_SCHEMA, {
-    temperature: 0.2,
-  });
-
-  const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+// LLM の生JSON（{tasks, cancellations, updates, summary}）を DB 保存用に正規化する。
+// deadline 文字列を deadline_at（DB形式）へ変換し、空要素を落とす。Gemini 版・ローカルLLM 版の
+// 両方から使う（ANALYZE_SCHEMA に沿った出力ならどの LLM の結果でも同じ正規化が効く）。
+// 戻り値: { tasks[], cancellations[], updates[], kadai[], yotei[], summary }
+//   kadai/yotei は後方互換（{deadline,content,details}）、tasks は正規化済み（deadline_at 付き）。
+function normalizeAnalysisResult(parsed) {
+  const p = parsed || {};
+  const rawTasks = Array.isArray(p.tasks) ? p.tasks : [];
   const tasks = rawTasks
     .map((it) => {
       const deadlineStr = String(it?.deadline ?? "").trim();
@@ -258,7 +256,7 @@ async function analyze(email, content, opts = {}) {
       };
     })
     .filter((t) => t.content);
-  const rawCancellations = Array.isArray(parsed.cancellations) ? parsed.cancellations : [];
+  const rawCancellations = Array.isArray(p.cancellations) ? p.cancellations : [];
   const cancellations = rawCancellations
     .map((it) => {
       const deadlineStr = String(it?.deadline ?? "").trim();
@@ -273,7 +271,7 @@ async function analyze(email, content, opts = {}) {
       };
     })
     .filter((c) => c.target);
-  const rawUpdates = Array.isArray(parsed.updates) ? parsed.updates : [];
+  const rawUpdates = Array.isArray(p.updates) ? p.updates : [];
   const updates = rawUpdates
     .map((it) => {
       const deadlineNorm = normalizeDeadline(String(it?.deadline ?? "").trim());
@@ -307,23 +305,34 @@ async function analyze(email, content, opts = {}) {
     updates,
     kadai: tasks.filter((t) => t.type === "kadai").map(toLegacy),
     yotei: tasks.filter((t) => t.type === "yotei").map(toLegacy),
-    summary: String(parsed.summary ?? "").trim(),
+    summary: String(p.summary ?? "").trim(),
   };
+}
+
+// 文字起こしを解析して { kadai[], yotei[], tasks[], cancellations[], updates[], summary } を返す。
+// kadai/yotei は後方互換（{deadline,content,details}）、tasks は正規化済み（deadline_at 付き）。
+async function analyze(email, content, opts = {}) {
+  const apiKey = await requireApiKey(email);
+  const today = opts.today || localDate();
+  const parsed = await callJson(apiKey, buildAnalyzePrompt(content, today), ANALYZE_SCHEMA, {
+    temperature: 0.2,
+  });
+  return normalizeAnalysisResult(parsed);
 }
 
 // =====================================================================
 // 2) 日次要約
 // =====================================================================
+// 日次要約のプロンプトを組み立てる（材料が空なら null）。Gemini 版・ローカルLLM 版で共有する。
 // transcripts: [{ filename, content, summary }]
-async function summarizeDay(email, day, transcripts) {
-  const apiKey = await requireApiKey(email);
+function buildDailySummaryPrompt(day, transcripts) {
   const material = (transcripts || [])
     .map((t, i) => `--- (${i + 1}) ${t.filename || ""} ---\n${t.content || ""}`)
     .join("\n\n")
     .slice(0, 24000); // トークン上限の保険
-  if (!material.trim()) return "";
+  if (!material.trim()) return null;
 
-  const prompt = [
+  return [
     `あなたは利用者専属のAIアシスタントです。${day} の1日の文字起こしをもとに、その日の出来事の要約を作成してください。`,
     "形式:",
     "1) 冒頭に2〜3文の総括。",
@@ -334,7 +343,13 @@ async function summarizeDay(email, day, transcripts) {
     "=== その日の文字起こし ===",
     material,
   ].join("\n");
+}
 
+// transcripts: [{ filename, content, summary }]
+async function summarizeDay(email, day, transcripts) {
+  const apiKey = await requireApiKey(email);
+  const prompt = buildDailySummaryPrompt(day, transcripts);
+  if (!prompt) return "";
   return callText(apiKey, prompt, { temperature: 0.3 });
 }
 
@@ -633,4 +648,8 @@ function localDate(date = new Date()) {
 module.exports = {
   analyze, summarizeDay, ask, extractTaskRequests, summarizeDocument,
   isConfiguredFor, verifyApiKey, localDate, MODEL, NO_KEY_MESSAGE,
+  // ローカルLLM(Ollama)経由の解析でも共有する部品:
+  // プロンプト組み立て・構造化出力スキーマ・生JSONの正規化。
+  buildAnalyzePrompt, buildDailySummaryPrompt, ANALYZE_SCHEMA,
+  normalizeAnalysisResult, normalizeDeadline,
 };

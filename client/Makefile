@@ -14,7 +14,7 @@ SRCS = cpp/src/main.cpp
 HDRS = $(wildcard cpp/src/*.hpp) cpp/third_party/httplib.h cpp/third_party/json.hpp
 
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps build stt-deps gpu-driver gpu-check run clean
+.PHONY: help install system-deps build stt-deps gpu-driver gpu-check run llm-deps run-llm clean
 
 help:
 	@echo "aihelper local audio worker Makefile"
@@ -26,7 +26,9 @@ help:
 	@echo "  make stt-deps      Install faster-whisper into stt/.venv (sudo)"
 	@echo "  make gpu-driver    Install NVIDIA driver when needed (sudo; reboot required)"
 	@echo "  make gpu-check     Check whether faster-whisper can see CUDA"
-	@echo "  make clean         Remove the binary, worker-audio, and stt/.venv"
+	@echo "  make llm-deps      Install the Ollama analyzer deps into llm/.venv"
+	@echo "  make run-llm       Start the local LLM (Ollama) analyzer worker"
+	@echo "  make clean         Remove the binary, worker-audio, stt/.venv, and llm/.venv"
 
 install: system-deps build stt-deps
 	@echo ""
@@ -76,5 +78,23 @@ gpu-check:
 run: $(BIN)
 	./$(BIN)
 
+# Local LLM (Ollama) analyzer: task/schedule extraction + daily summary in Python.
+# Independent from the C++ audio worker; only needs `requests`. Reuses accounts.json.
+llm-deps:
+	@echo ">> Installing the Ollama analyzer deps into llm/.venv"
+	python3 -m venv llm/.venv
+	llm/.venv/bin/pip install --upgrade pip
+	llm/.venv/bin/pip install -r llm/requirements.txt
+	@echo ">> Done. Make sure Ollama is running: 'ollama serve' and 'ollama pull qwen2.5:7b'"
+
+# Prefer the venv python if present; fall back to system python3.
+run-llm:
+	@if [ -x llm/.venv/bin/python3 ]; then \
+	  llm/.venv/bin/python3 llm/analyzer.py; \
+	else \
+	  echo ">> llm/.venv not found; using system python3 (run 'make llm-deps' to create a venv)"; \
+	  python3 llm/analyzer.py; \
+	fi
+
 clean:
-	rm -rf $(BIN) worker-audio stt/.venv
+	rm -rf $(BIN) worker-audio stt/.venv llm/.venv

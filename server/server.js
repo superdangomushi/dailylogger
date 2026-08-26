@@ -1330,15 +1330,140 @@ app.post("/api/client/jobs/result", async (req, res) => {
   }
 });
 
-// Gemini 解析（課題/予定抽出 → タスク登録 → 変更/取消の反映）の共通パイプライン。
-// 自動解析（/api/upload）と手動解析（/api/transcripts/:id/analyze）の両方から使う。
-async function runAnalysisPipeline(email, transcriptId, content) {
-  const result = await gemini.analyze(email, content);
+// ===================================================================
+// ローカルLLM(Ollama)ワーカー連携（/api/llm/*）
+// ===================================================================
+// 音声worker（/api/client/*）と違い、PC の UUID 登録は不要。JSON ボディの auth(email+token)
+// だけで認証する。未解析の文字起こしを claim → クライアントが手元の Ollama で解析 →
+// 生 JSON を result で返す、の2段構え。プロンプト組み立て・正規化・DB 保存はすべてサーバー側
+// （gemini.js の共有部品）で行い、クライアントは LLM 実行のプロキシに徹する。
+// Gemini APIキー未登録のユーザーでも、このワーカーがあれば課題抽出・日次要約が回る。
+const LLM_CLAIM_STALE_MIN = Math.max(Number(process.env.LLM_WORKER_STALE_MIN || 10), 1);
+
+// 未解析の文字起こしを1件確保し、組み立て済みプロンプトと構造化出力スキーマを返す。
+app.post("/api/llm/analyze/claim", async (req, res) => {
+  const account = await authFromJsonBody(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  try {
+    const row = await db.claimUnanalyzedTranscript(account.email, LLM_CLAIM_STALE_MIN);
+    if (!row) return res.json({ ok: true, job: null });
+    const prompt = gemini.buildAnalyzePrompt(row.content, gemini.localDate());
+    res.json({
+      ok: true,
+      job: { transcriptId: row.id, filename: row.filename, prompt, schema: gemini.ANALYZE_SCHEMA },
+    });
+  } catch (e) {
+    console.error("LLMワーカーの解析ジョブ確保に失敗:", e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// クライアントが Ollama で得た生 JSON（output）を受け取り、正規化して保存する。
+// error が来たときは claim ロックを外し、次のワーカーがすぐ再 claim できるようにする。
+app.post("/api/llm/analyze/result", async (req, res) => {
+  const account = await authFromJsonBody(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  const transcriptId = Number(req.body?.transcriptId);
+  if (!Number.isInteger(transcriptId) || transcriptId <= 0) {
+    return res.status(400).json({ ok: false, error: "transcriptId を指定してください" });
+  }
+  const output = typeof req.body?.output === "string" ? req.body.output : "";
+  const error = req.body?.error ? String(req.body.error) : "";
+  if (!output && !error) {
+    return res.status(400).json({ ok: false, error: "output または error を指定してください" });
+  }
+  try {
+    // 本人の文字起こしか確認（他人の transcript を弾く）。
+    const row = await db.getTranscriptForEmail(account.email, transcriptId);
+    if (!row) return res.status(404).json({ ok: false, error: "文字起こしが見つかりません" });
+
+    if (error) {
+      await db.releaseTranscriptClaim(account.email, transcriptId);
+      console.warn(`LLM解析失敗 (${account.email} #${transcriptId}): ${error.slice(0, 200)}`);
+      return res.json({ ok: true, status: "released" });
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(output);
+    } catch (_e) {
+      await db.releaseTranscriptClaim(account.email, transcriptId);
+      return res.status(400).json({ ok: false, error: "output が JSON として解析できません" });
+    }
+    const result = gemini.normalizeAnalysisResult(parsed);
+    const applied = await applyAnalysisResult(account.email, transcriptId, result);
+    console.log(
+      `LLM解析: ${account.email} ${row.filename} -> タスク ${applied.tasks.length} 件 / ` +
+        `変更 ${applied.updated.length} 件 / 削除 ${applied.canceled.length} 件`
+    );
+    res.json({ ok: true, status: "done", tasks: applied.tasks.length, summary: applied.summary || "" });
+  } catch (e) {
+    console.error("LLMワーカーの結果保存に失敗:", e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// その日の日次要約を生成すべきなら、材料入りのプロンプトを返す（不要なら job:null）。
+app.post("/api/llm/daily/claim", async (req, res) => {
+  const account = await authFromJsonBody(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  const day = String(req.body?.day || "").trim() || gemini.localDate();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return res.status(400).json({ ok: false, error: "day は YYYY-MM-DD で指定してください" });
+  }
+  try {
+    const work = await db.claimDailySummaryWork(account.email, day);
+    if (!work) return res.json({ ok: true, job: null });
+    const prompt = gemini.buildDailySummaryPrompt(work.day, work.transcripts);
+    if (!prompt) return res.json({ ok: true, job: null });
+    res.json({ ok: true, job: { day: work.day, prompt } });
+  } catch (e) {
+    console.error("LLMワーカーの日次要約ジョブ確保に失敗:", e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// クライアントが Ollama で生成した日次要約本文（output）を保存する。
+app.post("/api/llm/daily/result", async (req, res) => {
+  const account = await authFromJsonBody(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  const day = String(req.body?.day || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return res.status(400).json({ ok: false, error: "day は YYYY-MM-DD で指定してください" });
+  }
+  const output = typeof req.body?.output === "string" ? req.body.output.trim() : "";
+  const error = req.body?.error ? String(req.body.error) : "";
+  if (error) {
+    console.warn(`LLM日次要約失敗 (${account.email} ${day}): ${error.slice(0, 200)}`);
+    return res.json({ ok: true, status: "skipped" });
+  }
+  if (!output) return res.status(400).json({ ok: false, error: "output を指定してください" });
+  try {
+    await db.saveDailySummary(account.email, day, output);
+    console.log(`LLM日次要約: ${account.email} ${day} (${output.length} 文字)`);
+    res.json({ ok: true, status: "done" });
+  } catch (e) {
+    console.error("LLMワーカーの日次要約保存に失敗:", e.message);
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+// 正規化済みの解析結果（{kadai,yotei,summary,tasks,updates,cancellations}）を DB へ反映する。
+// saveAnalysis が analyzed_at をセットするので、以後この文字起こしは未解析扱いから外れる。
+// Gemini 経由（runAnalysisPipeline）とローカルLLM 経由（/api/llm/analyze/result）で共有する。
+async function applyAnalysisResult(email, transcriptId, result) {
   await db.saveAnalysis(transcriptId, result.kadai, result.yotei, result.summary);
   await db.upsertTasks(email, result.tasks, transcriptId);
   const updated = await db.applyTaskUpdates(email, result.updates);
   const canceled = await db.cancelTasks(email, result.cancellations);
   return { ...result, updated, canceled };
+}
+
+// Gemini 解析（課題/予定抽出 → タスク登録 → 変更/取消の反映）の共通パイプライン。
+// 自動解析（/api/upload）と手動解析（/api/transcripts/:id/analyze）の両方から使う。
+async function runAnalysisPipeline(email, transcriptId, content) {
+  const result = await gemini.analyze(email, content);
+  return applyAnalysisResult(email, transcriptId, result);
 }
 
 // 文字起こしテキストの受信 → MySQL に保存 → Gemini で課題/予定/要約を抽出。

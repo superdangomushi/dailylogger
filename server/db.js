@@ -112,6 +112,9 @@ async function ensureSchema() {
   await addColumnIfMissing("transcripts", "yotei_json", "LONGTEXT NULL");
   await addColumnIfMissing("transcripts", "summary", "TEXT NULL");
   await addColumnIfMissing("transcripts", "analyzed_at", "DATETIME NULL");
+  // ローカルLLM(Ollama)ワーカーが未解析の文字起こしを claim したときの確保時刻。
+  // 二重処理を防ぎつつ、途中で落ちても一定時間後に別ワーカーが再 claim できるようにする。
+  await addColumnIfMissing("transcripts", "analysis_claimed_at", "DATETIME NULL");
   await widenColumnIfNeeded("users", "password_hash", 255, "VARCHAR(255) NOT NULL");
   // 資料ファイル（PDF/TXT等）の AI 要約。
   await pool.query(`
@@ -463,6 +466,41 @@ async function getTranscriptForEmail(email, id) {
     [email, id]
   );
   return rows[0] || null;
+}
+
+// ローカルLLM(Ollama)ワーカー用: 未解析（analyzed_at IS NULL）の文字起こしを1件だけ確保する。
+// claimNextAudioJob と同じく LAST_INSERT_ID(id) トリックで UPDATE→SELECT を同一接続で行い、
+// 複数ワーカーが同時にポーリングしても別々の1件を原子的に受け取る。
+// analysis_claimed_at が staleMin 分より古い（＝処理が途中で落ちた）ものは再 claim 対象に含める。
+async function claimUnanalyzedTranscript(email, staleMin = 10) {
+  const conn = await pool.getConnection();
+  try {
+    const [r] = await conn.query(
+      `UPDATE transcripts
+       SET id = LAST_INSERT_ID(id), analysis_claimed_at = NOW()
+       WHERE email = ? AND analyzed_at IS NULL
+         AND (analysis_claimed_at IS NULL OR analysis_claimed_at < NOW() - INTERVAL ? MINUTE)
+       ORDER BY id ASC LIMIT 1`,
+      [email, Math.max(1, Number(staleMin) || 10)]
+    );
+    if (!r.affectedRows) return null;
+    const [rows] = await conn.query(
+      `SELECT id, filename, content FROM transcripts WHERE id = LAST_INSERT_ID()`
+    );
+    return rows[0] || null;
+  } finally {
+    conn.release();
+  }
+}
+
+// claim したが解析に失敗したとき、ロックを解除して即再 claim できるようにする
+// （analyzed_at は触らないので未解析のまま。staleMin を待たずに次のワーカーが拾える）。
+async function releaseTranscriptClaim(email, id) {
+  await pool.query(
+    `UPDATE transcripts SET analysis_claimed_at = NULL
+     WHERE email = ? AND id = ? AND analyzed_at IS NULL`,
+    [email, Number(id)]
+  );
 }
 
 // 指定日の本文を新しい順で集める（日次要約の材料）。
@@ -1084,6 +1122,30 @@ async function getDailySummary(email, day) {
   return rows[0] || null;
 }
 
+// ローカルLLM(Ollama)ワーカー用: 指定日の日次要約を生成すべきかを判定し、必要なら材料を返す。
+// 生成が必要なのは「その日の文字起こしが存在し、かつ 既存の要約が無い or 最新の文字起こしより古い」場合。
+// 二重生成は saveDailySummary の upsert(uq_email_day) で吸収されるため、厳密なロックは持たない。
+// 戻り値: 生成が必要なら { day, transcripts:[{filename,content,summary}] }、不要なら null。
+async function claimDailySummaryWork(email, day) {
+  // その日の文字起こしの最新更新時刻。無ければ生成対象なし。
+  const [maxRows] = await pool.query(
+    `SELECT MAX(updated_at) AS latest FROM transcripts
+     WHERE email = ? AND (filename LIKE ? OR DATE(updated_at) = ?)`,
+    [email, `${day}\\_%`, day]
+  );
+  const latest = maxRows[0]?.latest || null;
+  if (!latest) return null;
+
+  const existing = await getDailySummary(email, day);
+  if (existing && existing.generated_at && existing.generated_at >= latest) {
+    return null; // 既存要約が最新の文字起こしより新しい＝作り直し不要
+  }
+
+  const transcripts = await getTranscriptsForDay(email, day);
+  if (!transcripts.length) return null;
+  return { day, transcripts };
+}
+
 async function listDailySummaries(email, limit = 30) {
   const [rows] = await pool.query(
     `SELECT day, summary, generated_at FROM daily_summaries
@@ -1497,6 +1559,8 @@ module.exports = {
   listUnanalyzedTranscripts,
   countUnanalyzedTranscripts,
   getTranscriptForEmail,
+  claimUnanalyzedTranscript,
+  releaseTranscriptClaim,
   getTranscriptsForDay,
   listEmailsForDailySummary,
   searchTranscriptSnippets,
@@ -1540,6 +1604,7 @@ module.exports = {
   // summaries
   saveDailySummary,
   getDailySummary,
+  claimDailySummaryWork,
   listDailySummaries,
   // notifications
   recordNotification,

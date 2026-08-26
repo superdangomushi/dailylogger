@@ -310,3 +310,86 @@ WHERE j.id = ?              -- 要求されたジョブ
   認可される（ジョブ所有者のトークンは不要。ジョブ所有者側はダッシュボードのオプトインで許可済み）。
 - IPアドレスは登録時に記録するだけで、**識別には一切使わない**（NAT配下の別PC誤併合・IP偽装を排除）。
 - 旧クライアント（ヘッダー方式）はサーバーに接続できない。`git pull` してクライアント登録が必要。
+
+---
+
+# ローカルLLM(Ollama)ワーカー プロトコル（`/api/llm/*`）
+
+音声ワーカーとは別の、テキスト解析用ワーカー（`client/llm/analyzer.py`）とサーバーのやりとり。
+Gemini APIキー未登録のユーザーでも、手元の Ollama で「課題/予定抽出＋要約」と「日次要約」を回せる。
+詳細は [07-gemini-pipeline.md](07-gemini-pipeline.md) の「ローカルLLM経由の解析」も参照。
+
+## 音声ワーカーとの違い
+
+- **UUID(clientId) 登録は不要**。ボディは `auth`(email+token) だけ（`authFromJsonBody`）。PC の識別・排他は
+  ジョブ側（`transcripts.analysis_claimed_at`）で行うため、PC 登録フェーズが要らない。
+- **プロンプト・スキーマはサーバーが返す**。クライアントは受け取った prompt を Ollama に投げ、生の出力を
+  そのまま返すだけ。正規化・保存はサーバー（`server/gemini.js` / `applyAnalysisResult`）。
+
+## エンドポイント一覧
+
+| # | エンドポイント | 目的 |
+| --- | --- | --- |
+| 1 | `POST /api/llm/analyze/claim` | 未解析の文字起こしを1件確保し、プロンプト+スキーマを得る |
+| 2 | `POST /api/llm/analyze/result` | Ollama の生JSON出力（または error）を返す。サーバーが正規化・保存 |
+| 3 | `POST /api/llm/daily/claim` | 当日の日次要約が必要ならプロンプトを得る（不要なら `job:null`） |
+| 4 | `POST /api/llm/daily/result` | 日次要約の生成テキスト（または error）を返す |
+
+## 1. 解析ジョブ確保 `POST /api/llm/analyze/claim`
+
+リクエスト: `{ "auth": { "email", "token" } }`
+
+レスポンス（ジョブあり）:
+```json
+{
+  "ok": true,
+  "job": {
+    "transcriptId": 123,
+    "filename": "2026-08-25_15.txt",
+    "prompt": "あなたは… 本日の日付は 2026-08-25 …（本文入りの完成プロンプト）",
+    "schema": { "type": "object", "properties": { "...": "ANALYZE_SCHEMA" } }
+  }
+}
+```
+ジョブなし: `{ "ok": true, "job": null }`
+
+`schema` は Ollama の structured outputs（`format`）にそのまま渡す。`claimUnanalyzedTranscript` が
+`analysis_claimed_at` を原子的に更新して1件だけ確保するので、複数ワーカー/プロセスでも二重処理にならない。
+
+## 2. 解析結果 `POST /api/llm/analyze/result`
+
+リクエスト（成功）: `{ "auth", "transcriptId": 123, "output": "{\"tasks\":[...],\"summary\":\"...\"}" }`
+リクエスト（失敗）: `{ "auth", "transcriptId": 123, "error": "Ollama connection refused" }`
+
+- `output` … Ollama が返した**生JSON文字列**。サーバーが `JSON.parse` → `gemini.normalizeAnalysisResult`
+  → `applyAnalysisResult`（saveAnalysis + upsertTasks + applyTaskUpdates + cancelTasks）で保存する。
+- `error` … 解析失敗の報告。サーバーは `releaseTranscriptClaim` で claim ロックを外し、次のポーリングで
+  再 claim できるようにする（`analyzed_at` は NULL のまま）。
+- レスポンス: 成功 `{ "ok": true, "status": "done", "tasks": 3, "summary": "..." }` /
+  失敗報告 `{ "ok": true, "status": "released" }`。
+- `output` が JSON として壊れている場合は 400＋ロック解除。
+
+## 3. 日次要約ジョブ確保 `POST /api/llm/daily/claim`
+
+リクエスト: `{ "auth", "day": "2026-08-25" }`（`day` 省略時はサーバーのローカル当日）
+
+- サーバーは `claimDailySummaryWork` で「その日の文字起こしがあり、要約が未生成 or 最新の文字起こしより
+  古い」ときだけ `{ "job": { "day", "prompt" } }` を返す。不要なら `{ "job": null }`。
+- 日次要約のプロンプトは構造化出力ではない（自由テキスト）。`schema` は付かない。
+
+## 4. 日次要約結果 `POST /api/llm/daily/result`
+
+リクエスト（成功）: `{ "auth", "day": "2026-08-25", "output": "今日は…（要約本文）" }`
+リクエスト（失敗）: `{ "auth", "day": "2026-08-25", "error": "..." }`
+
+- 成功時は `saveDailySummary(email, day, output)`（upsert。二重生成は吸収される）。
+- レスポンス: `{ "ok": true, "status": "done" }`（失敗報告は `"status": "skipped"`）。
+
+## エラーコード（共通）
+
+| HTTP | 意味 | クライアントの対応 |
+| --- | --- | --- |
+| 401 | `auth` の email/token 不一致 | 再ログイン（accounts.json を更新） |
+| 400 | transcriptId/day 不正、または output が JSON でない | ログ確認。output不正時はサーバーがロック解除済み |
+| 404 | result: 本人の文字起こしでない | 諦める（別アカウントのジョブ等） |
+| 500 | サーバー内部エラー | 次のポーリングで再試行 |
