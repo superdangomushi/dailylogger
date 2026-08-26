@@ -3,8 +3,9 @@
 This directory is for each user's local PC. The public server in `../server`
 only stores audio jobs and exposes JSON/file APIs. This client polls the server
 for every enabled account configured in the local UI, downloads matching jobs,
-transcribes them locally with faster-whisper, and posts the text back to the
-server.
+transcribes them locally with faster-whisper, identifies owner/other speakers
+with SpeechBrain ECAPA when a profile is registered, and posts the text back
+to the server. It also converts owner-enrollment audio into the speaker profile.
 
 The worker itself is a single C++ binary (`audio-worker`): all networking,
 the polling loop, metrics reporting, and the local management UI are C++.
@@ -81,6 +82,9 @@ AUDIO_WORKER_POLL_SEC=5 ./audio-worker
 | `WHISPER_BATCH` | GPU: `16`, CPU: `0` | Batch size. `0` disables batched inference |
 | `WHISPER_CPU_THREADS` | all cores | CPU thread count |
 | `WHISPER_PYTHON` | `stt/.venv/bin/python3` | Custom Python executable |
+| `SPEAKER_DEVICE` | `cpu` | SpeechBrain speaker model device (`cpu` or `cuda`) |
+| `SPEAKER_MODEL` | `speechbrain/spkrec-ecapa-voxceleb` | Speaker embedding model |
+| `SPEAKER_THRESHOLD` | `0.35` | Owner cosine-similarity threshold used at enrollment |
 
 Paths default relative to the directory containing the `audio-worker` binary
 (normally `client/`).
@@ -96,8 +100,12 @@ All requests are JSON based: every request body carries the credentials
 3. `POST /api/client/claim` claims one queued job for each enabled account.
 4. `POST /api/client/jobs/download` (`{auth, clientId, jobId}`) downloads the
    audio file as the response body.
-5. `client/stt/transcribe.py` transcribes the file on this PC.
-6. `POST /api/client/jobs/result` sends `{ jobId, text }` (or `{ jobId, error }`) back.
+5. For `jobType=transcription`, `client/stt/transcribe.py` runs faster-whisper and,
+   when `speakerProfile` is present, labels each segment using ECAPA.
+6. For `jobType=speaker_enrollment`, the same script creates a normalized ECAPA
+   embedding instead of running Whisper.
+7. `POST /api/client/jobs/result` sends `{ jobId, text }`,
+   `{ jobId, speakerProfile }`, or `{ jobId, error }` back.
 
 The server then saves the returned text as a transcript. If the job owner has
 Gemini auto-analysis enabled, it also runs the same Gemini analysis, task

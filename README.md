@@ -53,6 +53,9 @@
   - サーバー文字起こしモードでは音声を `/api/audio` へ送信し、ローカルPCワーカーが処理
   - 送信できなかった音声は `audio-outbox` に残し、次回同期で再送
   - 簡易VADでほぼ無音のチャンクはスキップし負荷を軽減
+  - オーナー音声の登録では12秒のWAVを送るだけで、スマホ内で声紋計算は行わない
+  - `client/` のPCワーカーがSpeechBrain ECAPAで声紋を作成・照合し、
+    PCクライアント文字起こしへ `[オーナー]` / `[他人]` を付ける
   - 画面OFFでも継続するため PARTIAL_WAKE_LOCK を保持
 - **BackgroundSync**（サービスと一緒に起動）
   - ログイン済みのとき、完了テキストを `POST /api/upload`、未送信音声を `POST /api/audio` に送信
@@ -73,6 +76,8 @@
 | 録音/文字起こしサービス | `app/.../service/AudioCaptureService.kt` |
 | 通知制御の受信 | `app/.../service/MicControlReceiver.kt` |
 | チャンク化・簡易VAD | `app/.../audio/AudioChunker.kt` |
+| オーナー声登録用の短時間録音 | `app/.../speaker/OwnerVoiceEnrollmentRecorder.kt` |
+| 登録WAV送信・状態取得 | `app/.../net/AiHelperClient.kt`, `app/.../ui/MainViewModel.kt` |
 | whisper エンジン / 抽象 | `app/.../transcribe/WhisperEngine.kt`, `TranscriptionEngine.kt` |
 | 出力ファイル管理 | `app/.../transcribe/TranscriptStore.kt` |
 | モデルDL管理 | `app/.../model/ModelManager.kt` |
@@ -99,8 +104,9 @@ export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 2. 初回はモデルをダウンロード（日本語は base 以上を推奨）
 3. 「moneybot.jp 連携」でサーバーURL・アカウント・トークンを入力しログイン
 4. 「録音開始」→ 通知が常駐し、端末文字起こしテキストまたはサーバー文字起こし用の音声が自動送信される
-5. 締切が近づくとリマインド通知が届く。「AIに聞く / 頼む」から質問・依頼もできる
-6. マイクを一時的に手放したいときは通知の「一時停止」、戻すときは「再開」
+5. 話者を識別する場合はPCクライアントを起動し、録音停止中に「オーナーの声」→「声を登録」で12秒間読み上げる。以後は「PCクライアントで処理」で録音する
+6. 締切が近づくとリマインド通知が届く。「AIに聞く / 頼む」から質問・依頼もできる
+7. マイクを一時的に手放したいときは通知の「一時停止」、戻すときは「再開」
 
 ---
 
@@ -158,6 +164,7 @@ make run
 
 ## 注意
 - 常時録音＋推論はバッテリー/発熱の負荷が大きい。端末の電池最適化からの除外を推奨。
-- 端末再起動後の自動再開・話者分離・音声保存は対象外（必要なら拡張可能）。
+- 端末再起動後の自動再開・「他人A/他人B」の分離・音声保存は対象外。オーナー/他人の
+  識別は端末文字起こしモードだけで動作し、10秒内で話者が交代した場合は主な声として1つに判定される。
 - moneybot.jp 連携・LINE・Gemini 連携はゼミ課題向けの簡易実装（トークン平文保持・最小限の認証）。
 - リマインドや日次要約の自動生成は Gemini / LINE の API を消費する。間隔は環境変数で調整可能。

@@ -363,7 +363,7 @@ final class AudioCaptureService: ObservableObject {
         // サーバー文字起こしモード: 端末では Whisper を回さず、音声をアップロードするだけ。
         let serverMode = accountStore.serverTranscribe && accountStore.loggedIn
         if serverMode {
-            pushState { $0.modelName = "サーバー処理（音声アップロード）" }
+            pushState { $0.modelName = "PCクライアント処理（音声アップロード）" }
             backgroundSync?.triggerNow() // 前回送れなかった区間があれば同期ループで再送する
         } else {
             // モデル読み込み（利用者が選択したモデルを優先。未DLならDL済みの先頭）
@@ -422,7 +422,7 @@ final class AudioCaptureService: ObservableObject {
                 $0.transcribing = false
                 $0.transcribeLabel = nil
                 $0.chunksDone += 1
-                $0.lastText = "\(seg.label) をサーバーへ送信しました（サーバーで文字起こし中）"
+                $0.lastText = "\(seg.label) を送信しました（PCクライアントの処理待ち）"
             }
             backgroundSync?.triggerNow() // 通信が生きているうちに滞留分も送る
         } else {
@@ -448,12 +448,13 @@ final class AudioCaptureService: ObservableObject {
         }
     }
 
-    /// 1区間(最大1時間)を30秒窓で順に文字起こしし、テキストを保存して送信をトリガする。
+    /// 端末モードでは話者識別を行わず、30秒窓ごとに文字起こしする。
     private func transcribeSegment(_ seg: Segment) {
         let windowSamples = AudioChunker.sampleRate * AudioChunker.chunkSeconds
         let attrs = try? FileManager.default.attributesOfItem(atPath: seg.file.path)
         let fileBytes = (attrs?[.size] as? Int64) ?? 0
-        let totalWindows = max(1, Int(fileBytes / 2) / windowSamples + 1)
+        let sampleCount = Int(fileBytes / 2)
+        let totalWindows = max(1, (sampleCount + windowSamples - 1) / windowSamples)
         var sb = ""
         var index = 0
         pushState {
@@ -464,7 +465,9 @@ final class AudioCaptureService: ObservableObject {
         PcmSegment.forEachWindow(file: seg.file, windowSamples: windowSamples) { window in
             if !AudioChunker.isSilent(window) {
                 let part = engine?.transcribe(window) ?? ""
-                if !part.isEmpty { sb += part + " " }
+                if !part.isEmpty {
+                    sb += part + " "
+                }
             }
             index += 1
             let progress = min(1, max(0, Float(index) / Float(totalWindows)))

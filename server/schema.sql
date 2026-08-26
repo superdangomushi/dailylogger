@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS audio_jobs (
   stored_path   VARCHAR(1024) NOT NULL,
   mime          VARCHAR(128) NULL,
   size_bytes    BIGINT       NOT NULL DEFAULT 0,
+  -- transcription=通常文字起こし、speaker_enrollment=オーナー声紋作成。
+  job_type      VARCHAR(32)  NOT NULL DEFAULT 'transcription',
   status        VARCHAR(16)  NOT NULL DEFAULT 'queued',
   error         TEXT         NULL,
   -- 文字起こし完了後に作られた transcripts 行への参照。
@@ -161,6 +163,17 @@ CREATE TABLE IF NOT EXISTS audio_jobs (
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY idx_audio_email (email, created_at),
   KEY idx_audio_status (status)
+) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+-- PCワーカーが登録音声から抽出したオーナー話者埋め込み。
+-- profile_enc はサーバーの資格情報暗号鍵で AES-256-GCM 暗号化する。
+-- 登録音声そのものは speaker_enrollment ジョブ完了後に削除する。
+CREATE TABLE IF NOT EXISTS speaker_profiles (
+  email         VARCHAR(255) NOT NULL PRIMARY KEY,
+  profile_enc   LONGTEXT     NOT NULL,
+  model_version VARCHAR(128) NOT NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 -- 音声ジョブを処理するワーカーPC（クライアント）。IDはサーバーが自動採番し、

@@ -1,4 +1,5 @@
 import SwiftUI
+import AVFoundation
 
 /// 録音・文字起こし関連（状態 / 操作 / モデル）をまとめたタブ。
 struct RecordingTabView: View {
@@ -11,6 +12,8 @@ struct RecordingTabView: View {
                 StatusCard(state: service.state)
 
                 TranscribeModeCard()
+
+                OwnerVoiceCard()
 
                 SegmentIntervalCard()
 
@@ -109,9 +112,74 @@ struct StatusCard: View {
     }
 }
 
+/// オーナーの登録音声をPCクライアントへ渡すためのカード。
+struct OwnerVoiceCard: View {
+    @EnvironmentObject var viewModel: MainViewModel
+    @EnvironmentObject var service: AudioCaptureService
+    @ObservedObject private var enrollment = OwnerVoiceEnrollmentController.shared
+
+    var body: some View {
+        CardView {
+            Text("オーナーの声").font(.headline)
+            Text(statusText)
+                .foregroundColor(viewModel.ui.ownerVoiceRegistered ? AppTheme.primary : .primary)
+            Text("iPhoneでは12秒間の声を録音して送るだけです。PCクライアントが声紋作成と［オーナー］／［他人］の判定を行います。")
+                .font(.caption)
+            if !viewModel.ui.account.loggedIn {
+                Text("利用するには先にAIHelperへログインしてください。")
+                    .font(.caption)
+            } else if !viewModel.ui.serverTranscribe {
+                Text("※ 話者ラベルを付けるには「PCクライアントで処理」を選び、PCクライアントを起動してください。")
+                    .font(.caption).foregroundColor(AppTheme.tertiary)
+            }
+
+            if enrollment.isRecording {
+                Text("普段の声で続けて読んでください：今日は予定を確認して、必要な連絡と買い物を済ませます。")
+                    .font(.caption)
+                ProgressView(value: Double(enrollment.progress))
+                Text("録音中 \(Int(enrollment.progress * Float(OwnerVoiceEnrollmentController.enrollmentSeconds))) / \(OwnerVoiceEnrollmentController.enrollmentSeconds)秒")
+                    .font(.caption)
+                Button("中止") { enrollment.cancel() }.buttonStyle(.bordered)
+            } else if viewModel.ui.ownerVoiceUploading {
+                ProgressView()
+                Text("登録音声を送信中…").font(.caption)
+            } else {
+                HStack(spacing: 8) {
+                    Button(viewModel.ui.ownerVoiceRegistered ? "声を再登録" : "声を登録") {
+                        enrollment.start { samples in viewModel.enrollOwnerVoice(samples) }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!viewModel.ui.account.loggedIn || service.state.active || service.state.draining)
+                    if viewModel.ui.ownerVoiceRegistered {
+                        Button("削除") { viewModel.deleteOwnerVoice() }
+                            .buttonStyle(.bordered)
+                            .disabled(service.state.active || service.state.draining)
+                    }
+                }
+                if service.state.active || service.state.draining {
+                    Text("声の登録・削除は通常の録音を終了してから行えます。").font(.caption)
+                }
+            }
+            if let message = enrollment.message ?? viewModel.ui.ownerVoiceMessage {
+                Text(message).font(.caption)
+            }
+        }
+    }
+
+    private var statusText: String {
+        switch viewModel.ui.ownerVoiceStatus {
+        case "queued": return "登録音声の処理待ち"
+        case "processing": return "PCクライアントで声紋を作成中"
+        case "error": return viewModel.ui.ownerVoiceRegistered ? "再登録失敗（以前の声紋は有効）" : "登録失敗"
+        case "ready": return "登録済み（話者識別 ON）"
+        default: return "未登録"
+        }
+    }
+}
+
 /// 文字起こし方法の選択カード。
 /// 端末処理(Whisper)は遅い端末だと時間がかかるため、音声をサーバーへアップロードして
-/// サーバー側で文字起こしするモードを選べる（AIHelper ログインが必要）。
+/// 音声をサーバー経由でPCクライアントへ渡して処理するモード。
 struct TranscribeModeCard: View {
     @EnvironmentObject var viewModel: MainViewModel
 
@@ -131,9 +199,9 @@ struct TranscribeModeCard: View {
                 viewModel.setServerTranscribe(true)
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("サーバーで処理（音声をアップロード）")
+                    Text("PCクライアントで処理（音声をアップロード）")
                     Text(viewModel.ui.account.loggedIn
-                         ? "録音区間の音声をサーバーへ送り、サーバー側で文字起こし。処理状況はダッシュボードで確認できます。"
+                         ? "録音音声をサーバー経由でPCへ渡し、PCクライアントが文字起こしと話者識別を行います。"
                          : "利用するには先に「AI」タブで AIHelper にログインしてください。")
                         .font(.caption).foregroundColor(.secondary)
                 }
@@ -225,13 +293,14 @@ struct ModelCard: View {
 /// Android は一時停止/再開を通知バーのボタンで行うが、iOS は常駐通知が無いためここに置く。
 struct ControlRow: View {
     @EnvironmentObject var service: AudioCaptureService
+    @ObservedObject private var enrollment = OwnerVoiceEnrollmentController.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Button("録音開始") { AudioCaptureService.shared.start() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(service.state.active)
+                    .disabled(service.state.active || enrollment.isBusy)
                 if service.state.active {
                     if service.state.paused {
                         Button("再開") { AudioCaptureService.shared.resumeMic() }
@@ -247,8 +316,151 @@ struct ControlRow: View {
             }
             Text("※ 一時停止はマイクを完全に解放し、再開で再取得します。")
                 .font(.caption)
+            if enrollment.isBusy {
+                Text("声の登録中は通常録音を開始できません。").font(.caption)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// 12秒のオーナー音声をメモリ上だけに録音し、送信用のPCMを渡す。
+final class OwnerVoiceEnrollmentController: ObservableObject {
+    static let shared = OwnerVoiceEnrollmentController()
+    static let enrollmentSeconds = 12
+
+    @Published private(set) var isRecording = false
+    @Published private(set) var progress: Float = 0
+    @Published private(set) var message: String?
+
+    var isBusy: Bool { isRecording }
+
+    private var audioEngine: AVAudioEngine?
+    private var tapInstalled = false
+    private let sampleLock = NSLock()
+    private var samples: [Int16] = []
+    private var finishing = false
+    private var onCaptured: (([Int16]) -> Void)?
+
+    private init() {}
+
+    func start(onCaptured: @escaping ([Int16]) -> Void) {
+        guard !isBusy else { return }
+        let session = AVAudioSession.sharedInstance()
+        guard session.recordPermission == .granted else {
+            message = "声を登録するにはマイク権限が必要です"
+            return
+        }
+        do {
+            try session.setCategory(.record, mode: .measurement, options: [.allowBluetooth])
+            try session.setActive(true)
+
+            let engine = AVAudioEngine()
+            let input = engine.inputNode
+            let inputFormat = input.outputFormat(forBus: 0)
+            guard let outputFormat = AVAudioFormat(
+                commonFormat: .pcmFormatInt16,
+                sampleRate: Double(AudioChunker.sampleRate),
+                channels: 1,
+                interleaved: true),
+                let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+                throw EnrollmentError.audioFormat
+            }
+
+            sampleLock.lock()
+            samples.removeAll(keepingCapacity: true)
+            samples.reserveCapacity(AudioChunker.sampleRate * Self.enrollmentSeconds)
+            sampleLock.unlock()
+            progress = 0
+            message = nil
+            finishing = false
+            self.onCaptured = onCaptured
+            isRecording = true
+            audioEngine = engine
+
+            input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+                guard let self else { return }
+                let ratio = outputFormat.sampleRate / buffer.format.sampleRate
+                let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 16
+                guard let converted = AVAudioPCMBuffer(
+                    pcmFormat: outputFormat, frameCapacity: capacity) else { return }
+                var consumed = false
+                var conversionError: NSError?
+                converter.convert(to: converted, error: &conversionError) { _, status in
+                    if consumed {
+                        status.pointee = .noDataNow
+                        return nil
+                    }
+                    consumed = true
+                    status.pointee = .haveData
+                    return buffer
+                }
+                guard conversionError == nil,
+                      let channel = converted.int16ChannelData else { return }
+                let target = AudioChunker.sampleRate * Self.enrollmentSeconds
+                self.sampleLock.lock()
+                let remaining = max(0, target - self.samples.count)
+                let count = min(remaining, Int(converted.frameLength))
+                if count > 0 {
+                    self.samples.append(contentsOf: UnsafeBufferPointer(start: channel[0], count: count))
+                }
+                let recorded = self.samples.count
+                self.sampleLock.unlock()
+                DispatchQueue.main.async {
+                    self.progress = min(1, Float(recorded) / Float(target))
+                    if recorded >= target { self.finishCapture() }
+                }
+            }
+            tapInstalled = true
+            engine.prepare()
+            try engine.start()
+        } catch {
+            stopCapture()
+            isRecording = false
+            onCaptured = nil
+            message = "マイクを初期化できませんでした: \(error.localizedDescription)"
+        }
+    }
+
+    func cancel() {
+        guard isRecording else { return }
+        stopCapture()
+        isRecording = false
+        progress = 0
+        onCaptured = nil
+        message = "声の登録を中止しました"
+    }
+
+    private func finishCapture() {
+        guard isRecording, !finishing else { return }
+        finishing = true
+        stopCapture()
+        isRecording = false
+        message = nil
+        sampleLock.lock()
+        let captured = samples
+        samples.removeAll()
+        sampleLock.unlock()
+        let callback = onCaptured
+        onCaptured = nil
+        finishing = false
+        progress = 1
+        callback?(captured)
+    }
+
+    private func stopCapture() {
+        if tapInstalled {
+            audioEngine?.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        audioEngine?.stop()
+        audioEngine = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private enum EnrollmentError: LocalizedError {
+        case audioFormat
+        var errorDescription: String? { "16kHz音声への変換を初期化できません" }
     }
 }
 

@@ -1006,6 +1006,46 @@ app.post("/api/audio", heavyLimiter, async (req, res) => {
   }
 });
 
+// オーナー声の登録音声。スマホは録音とアップロードだけを行い、声紋抽出は
+// speaker_enrollment ジョブを取得したPCワーカーが実行する。
+app.post("/api/speaker-profile", heavyLimiter, async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "アカウント情報が一致しません" });
+  if (!Buffer.isBuffer(req.body) || req.body.length < 32_000) {
+    return res.status(400).json({ ok: false, error: "登録音声が短すぎます" });
+  }
+  const mime = (req.get("Content-Type") || "audio/wav").split(";")[0];
+  try {
+    const jobId = await audio.enqueueSpeakerEnrollment(account.email, req.body, mime);
+    console.log(`オーナー声登録を受付: ${account.email} (${req.body.length} bytes) job#${jobId}`);
+    res.json({ ok: true, jobId, queued: true, status: "queued" });
+  } catch (e) {
+    console.error("オーナー声登録の受付に失敗:", e.message);
+    res.status(500).json({ ok: false, error: "登録音声の保存に失敗しました" });
+  }
+});
+
+app.get("/api/speaker-profile", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    res.json({ ok: true, ...(await audio.speakerProfileStatus(account.email)) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+app.delete("/api/speaker-profile", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    await audio.deleteSpeakerProfileData(account.email);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
 // 音声ジョブの処理状況一覧。active=1 で未処理（queued）・処理中（processing）・
 // 失敗（error）だけに絞る（ダッシュボードはこちらを使う。完了分は表示しない）。
 app.get("/api/audio/jobs", async (req, res) => {
@@ -1240,6 +1280,8 @@ app.post("/api/client/claim", async (req, res) => {
         mime: job.mime,
         sizeBytes: job.sizeBytes,
         quality: job.quality,
+        jobType: job.jobType,
+        speakerProfile: job.speakerProfile || null,
       },
     });
   } catch (e) {
@@ -1318,10 +1360,13 @@ app.post("/api/client/jobs/result", async (req, res) => {
     }
     const text = typeof req.body?.text === "string" ? req.body.text : "";
     const error = req.body?.error ? String(req.body.error) : "";
-    if (!text && !error) {
-      return res.status(400).json({ ok: false, error: "text または error を指定してください" });
+    const speakerProfile = req.body?.speakerProfile;
+    if (!text && !error && !speakerProfile) {
+      return res.status(400).json({ ok: false, error: "text / speakerProfile / error のいずれかを指定してください" });
     }
-    const result = await audio.completeRemoteJob(account.email, jobId, { text, error, workerId: worker.id });
+    const result = await audio.completeRemoteJob(account.email, jobId, {
+      text, error, speakerProfile, workerId: worker.id,
+    });
     if (!result.ok) return res.status(result.status || 500).json({ ok: false, error: result.error });
     res.json(result);
   } catch (e) {

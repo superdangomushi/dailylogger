@@ -8,10 +8,13 @@ import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.net.AccountStore
 import com.ishilab.transcriber.net.AiHelperClient
 import com.ishilab.transcriber.net.BackgroundSync
+import com.ishilab.transcriber.service.AudioCaptureService
+import com.ishilab.transcriber.speaker.OwnerVoiceEnrollmentRecorder
 import com.ishilab.transcriber.google.CalendarEvent
 import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,6 +98,12 @@ data class UiState(
     val sttQuality: String = "high",
     val sttQualityBusy: Boolean = false,
     val sttQualityMessage: String? = null,
+    // オーナー声紋（スマホは登録音声の録音/送信のみ。作成・照合はPCクライアント）。
+    val ownerVoiceRegistered: Boolean = false,
+    val ownerVoiceStatus: String = "none",
+    val ownerVoiceEnrolling: Boolean = false,
+    val ownerVoiceEnrollmentProgress: Float = 0f,
+    val ownerVoiceMessage: String? = null,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
     val googleConnected: Boolean get() = googleEmails.isNotEmpty()
@@ -107,12 +116,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(app)
     private val AIHelper = AiHelperClient()
     private var foregroundSyncJob: Job? = null
+    private var ownerVoiceEnrollmentJob: Job? = null
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
 
     init {
-        _ui.update { it.copy(account = currentAccount(), serverTranscribe = accountStore.serverTranscribe) }
+        _ui.update {
+            it.copy(
+                account = currentAccount(),
+                serverTranscribe = accountStore.serverTranscribe,
+            )
+        }
         refresh()
         // ログイン済みで起動した場合もカレンダー・予定タブにデータが出るよう最初に読み込む。
         if (accountStore.loggedIn) {
@@ -122,6 +137,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             loadServerTranscripts()
             loadChatHistory()
             loadSttQuality()
+            loadSpeakerProfileStatus()
         }
     }
 
@@ -197,6 +213,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 com.ishilab.transcriber.net.ReminderNotifier.poll(getApplication<Application>())
             }
+
+            runCatching {
+                AIHelper.fetchSpeakerProfileStatus(baseUrl, email, token).getOrThrow()
+            }.onSuccess(::applySpeakerProfileStatus)
         }
         syncCalendarSilently()
     }
@@ -231,6 +251,121 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setServerTranscribe(enabled: Boolean) {
         accountStore.serverTranscribe = enabled
         _ui.update { it.copy(serverTranscribe = enabled) }
+    }
+
+    /**
+     * スマホは12秒の登録音声を録音して送信するだけ。声紋作成はPCクライアントの
+     * speaker_enrollment ジョブとして行い、完了状態はサーバーから取得する。
+     */
+    fun enrollOwnerVoice() {
+        if (ownerVoiceEnrollmentJob?.isActive == true) return
+        if (!accountStore.loggedIn) {
+            _ui.update { it.copy(ownerVoiceMessage = "先にAIHelperへログインしてください") }
+            return
+        }
+        if (AudioCaptureService.state.value.active) {
+            _ui.update { it.copy(ownerVoiceMessage = "通常の録音を終了してから声を登録してください") }
+            return
+        }
+        _ui.update {
+            it.copy(
+                ownerVoiceEnrolling = true,
+                ownerVoiceEnrollmentProgress = 0f,
+                ownerVoiceMessage = null,
+            )
+        }
+        ownerVoiceEnrollmentJob = viewModelScope.launch {
+            try {
+                val samples = withContext(Dispatchers.IO) {
+                    OwnerVoiceEnrollmentRecorder.record(getApplication<Application>()) { progress ->
+                        _ui.update { it.copy(ownerVoiceEnrollmentProgress = progress) }
+                    }
+                }
+                withContext(Dispatchers.IO) {
+                    AIHelper.uploadOwnerVoice(
+                        accountStore.baseUrl, accountStore.email, accountStore.token,
+                        samples, OwnerVoiceEnrollmentRecorder.SAMPLE_RATE,
+                    ).getOrThrow()
+                }
+                _ui.update {
+                    it.copy(
+                        ownerVoiceStatus = "queued",
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 1f,
+                        ownerVoiceMessage = "登録音声を送信しました。PCクライアントの声紋作成待ちです",
+                    )
+                }
+            } catch (_: CancellationException) {
+                _ui.update {
+                    it.copy(
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = "声の登録を中止しました",
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = e.message ?: "声の登録に失敗しました",
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelOwnerVoiceEnrollment() {
+        ownerVoiceEnrollmentJob?.cancel()
+    }
+
+    fun deleteOwnerVoice() {
+        if (ownerVoiceEnrollmentJob?.isActive == true) return
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.deleteSpeakerProfile(accountStore.baseUrl, accountStore.email, accountStore.token)
+            }
+            _ui.update {
+                when (result) {
+                    is AiHelperClient.Result.Ok -> it.copy(
+                        ownerVoiceRegistered = false,
+                        ownerVoiceStatus = "none",
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = result.message,
+                    )
+                    is AiHelperClient.Result.Error -> it.copy(ownerVoiceMessage = result.message)
+                }
+            }
+        }
+    }
+
+    fun loadSpeakerProfileStatus() {
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                AIHelper.fetchSpeakerProfileStatus(
+                    accountStore.baseUrl, accountStore.email, accountStore.token,
+                )
+            }.onSuccess(::applySpeakerProfileStatus)
+        }
+    }
+
+    private fun applySpeakerProfileStatus(status: AiHelperClient.SpeakerProfileStatus) {
+        val message = when (status.status) {
+            "queued" -> "PCクライアントの処理待ちです"
+            "processing" -> "PCクライアントが声紋を作成中です"
+            "error" -> status.error ?: "声紋作成に失敗しました"
+            "ready" -> "PCクライアントでオーナー声紋の登録が完了しました"
+            else -> null
+        }
+        _ui.update {
+            it.copy(
+                ownerVoiceRegistered = status.registered,
+                ownerVoiceStatus = status.status,
+                ownerVoiceMessage = message,
+            )
+        }
     }
 
     /** 文字起こしに使うモデルを選び直す（ダウンロード済みのモデルのみ）。 */
@@ -302,6 +437,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     loadChatHistory()
                     loadMoodle()
                     loadSttQuality()
+                    loadSpeakerProfileStatus()
                     refreshGoogle()
                 },
                 onFailure = { e ->
@@ -322,6 +458,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 courses = emptyList(), coursesError = null, coursesLoading = false,
                 summary = null, summaryError = null,
                 sttQuality = "high", sttQualityMessage = null,
+                ownerVoiceRegistered = false, ownerVoiceStatus = "none", ownerVoiceMessage = null,
                 serverTranscripts = emptyList(),
                 serverTranscriptsLoading = false,
                 serverTranscriptsError = null,

@@ -12,6 +12,7 @@ users ─────────────┐ (email が全テーブルの外
 audio_jobs ──claimed_by──→ audio_workers ←──worker_id── audio_worker_prefs
      │
      └─transcript_id──→ transcripts ──source_id←── tasks ──task_id←── notifications
+speaker_profiles ──email──→ users
                                                 daily_summaries / chat_messages / ...
 ```
 
@@ -37,6 +38,7 @@ audio_jobs ──claimed_by──→ audio_workers ←──worker_id── audi
 | `filename` | | 元のWAVファイル名（サニタイズ済み） |
 | `stored_path` | VARCHAR(1024) | サーバー上の保存パス（`uploads/audio/`）。**成功（done）時のみ物理削除**。error でも保持され、手動再試行に使う |
 | `mime` / `size_bytes` | | |
+| `job_type` | VARCHAR(32) | `transcription`（文字起こし）/ `speaker_enrollment`（PCで声紋作成） |
 | `status` | VARCHAR(16) | `queued` → `processing` → `done` / `error`。失敗しても上限までは自動で `queued` に戻る（下記） |
 | `error` | TEXT | 最後の失敗理由（ワーカーからの報告、最大1000文字）。再キュー中も残り、成功時にクリア |
 | `transcript_id` | INT | 完了時に紐付く transcripts.id |
@@ -59,6 +61,17 @@ claim は `UPDATE ... SET id=LAST_INSERT_ID(id), status='processing', claimed_by
 
 なお stale 再キュー（`requeueStaleAudioJobs`）はワーカー停止とみなした振り直しであり、
 失敗回数の上限判定はしない（attempts は claim 時に加算されるので次の claim で +1 される）。
+
+## speaker_profiles — オーナー話者プロファイル
+
+| カラム | 型 | 意味 |
+| --- | --- | --- |
+| `email` | VARCHAR(255) PRIMARY KEY | 登録したアカウント |
+| `profile_enc` | LONGTEXT | `cred.js` のAES-256-GCMで暗号化したJSON（正規化埋め込み + しきい値） |
+| `model_version` | VARCHAR(128) | 埋め込みを作ったモデル世代。不一致ならPCが再登録を促す |
+| `created_at` / `updated_at` | DATETIME | 作成・更新時刻 |
+
+登録元WAVはこのテーブルに保存せず、`speaker_enrollment` ジョブの成功時に物理削除する。
 
 ## audio_workers — ワーカーPC（クライアント）
 
@@ -117,7 +130,7 @@ claim は `UPDATE ... SET id=LAST_INSERT_ID(id), status='processing', claimed_by
 
 ## 暗号化について
 
-`waseda_password_enc` / `gemini_api_key_enc` / `google_accounts.refresh_token` は
+`waseda_password_enc` / `gemini_api_key_enc` / `google_accounts.refresh_token` / `speaker_profiles.profile_enc` は
 `server/cred.js` の AES-256-GCM（`iv:tag:cipher` hex形式）で暗号化して保存。
 鍵は環境変数 `CRED_ENC_KEY`（64桁hex）か、無ければ初回起動時に `server/.cred-key` に自動生成。
 鍵ローテーションは `node server/rotate-cred-key.js`（全暗号化カラムを再暗号化する）。

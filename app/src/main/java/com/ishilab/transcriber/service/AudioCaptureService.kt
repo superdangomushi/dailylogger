@@ -130,7 +130,7 @@ class AudioCaptureService : Service() {
         pushState {
             it.copy(
                 active = true, paused = false, error = null,
-                accumulatedRecordMs = 0L, recordingStartedElapsed = 0L
+                accumulatedRecordMs = 0L, recordingStartedElapsed = 0L,
             )
         }
         // モデル読み込み＋ワーカー起動はバックグラウンドで
@@ -365,7 +365,7 @@ class AudioCaptureService : Service() {
         // サーバー文字起こしモード: 端末では Whisper を回さず、音声をアップロードするだけ。
         val serverMode = accountStore.serverTranscribe && accountStore.loggedIn
         if (serverMode) {
-            pushState { it.copy(modelName = "サーバー処理（音声アップロード）") }
+            pushState { it.copy(modelName = "PCクライアント処理（音声アップロード）") }
             updateNotification()
             backgroundSync?.triggerNow() // 前回送れなかった区間があれば同期ループで再送する
         } else {
@@ -430,7 +430,7 @@ class AudioCaptureService : Service() {
                     it.copy(
                         transcribing = false, transcribeLabel = null,
                         chunksDone = it.chunksDone + 1,
-                        lastText = "${seg.label} をサーバーへ送信しました（サーバーで文字起こし中）",
+                        lastText = "${seg.label} を送信しました（PCクライアントの処理待ち）",
                     )
                 }
                 backgroundSync?.triggerNow() // 通信が生きているうちに滞留分も送る
@@ -461,10 +461,14 @@ class AudioCaptureService : Service() {
         }
     }
 
-    /** 1区間(最大1時間)を30秒窓で順に文字起こしし、テキストを保存して送信をトリガする。 */
+    /**
+     * 1区間(最大1時間)を順に文字起こしする。
+     * 端末モードでは話者識別を行わず、登録と識別は PC クライアントに任せる。
+     */
     private fun transcribeSegment(seg: Segment) {
         val windowSamples = AudioChunker.SAMPLE_RATE * AudioChunker.CHUNK_SECONDS
-        val totalWindows = maxOf(1, ((seg.file.length() / 2) / windowSamples + 1).toInt())
+        val sampleCount = seg.file.length() / 2
+        val totalWindows = maxOf(1, ((sampleCount + windowSamples - 1) / windowSamples).toInt())
         val sb = StringBuilder()
         var index = 0
         pushState { it.copy(transcribing = true, transcribeLabel = seg.label, transcribeProgress = 0f) }
@@ -477,7 +481,9 @@ class AudioCaptureService : Service() {
                     } catch (e: Exception) {
                         Log.e(TAG, "transcribe error", e); ""
                     }
-                    if (part.isNotBlank()) sb.append(part).append(' ')
+                    if (part.isNotBlank()) {
+                        sb.append(part).append(' ')
+                    }
                 }
                 index++
                 pushState { it.copy(transcribeProgress = (index.toFloat() / totalWindows).coerceIn(0f, 1f)) }
@@ -604,6 +610,7 @@ class AudioCaptureService : Service() {
         private const val MIN_SEGMENT_SAMPLES = 16_000L
         // 終了時、最後の区間の文字起こし完了を待つ上限。
         private const val WORKER_JOIN_MS = 30 * 60 * 1000L
+        // 声紋登録時は話者交代を拾うため、Whisper の窓を通常30秒から10秒へ短縮する。
         private val POISON = Segment(File(""), 0L, "")
 
         const val ACTION_START = "com.ishilab.transcriber.START"

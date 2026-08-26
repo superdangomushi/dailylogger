@@ -18,6 +18,7 @@
 | [06-database.md](06-database.md) | MySQLの全テーブルスキーマとカラムの意味 |
 | [07-gemini-pipeline.md](07-gemini-pipeline.md) | Gemini解析パイプライン（自動/手動解析、gemini_auto設定、日次要約、AIチャット） |
 | [08-dashboard.md](08-dashboard.md) | ダッシュボード（Web UI）の画面ごとの機能と対応するコードの場所 |
+| [09-speaker-identification.md](09-speaker-identification.md) | オーナー音声の登録、PCクライアントの声紋作成・識別、データ保護と制約 |
 
 ## まず読むなら
 
