@@ -90,7 +90,7 @@ import com.ishilab.transcriber.service.NotificationPrefs
 import com.ishilab.transcriber.service.ServiceState
 import com.ishilab.transcriber.service.TravelAssistant
 import com.ishilab.transcriber.service.TravelPrefs
-import com.ishilab.transcriber.speaker.OwnerVoiceProfile
+import com.ishilab.transcriber.speaker.OwnerVoiceEnrollmentRecorder
 import com.ishilab.transcriber.ui.ChatMessage
 import com.ishilab.transcriber.ui.MainViewModel
 import com.ishilab.transcriber.ui.TranscriptItem
@@ -166,18 +166,26 @@ internal fun OwnerVoiceCard(
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("オーナーの声", style = MaterialTheme.typography.titleMedium)
             Text(
-                if (ui.ownerVoiceRegistered) "登録済み（話者識別 ON）" else "未登録",
+                when (ui.ownerVoiceStatus) {
+                    "queued" -> "登録音声の処理待ち"
+                    "processing" -> "PCクライアントで声紋を作成中"
+                    "error" -> if (ui.ownerVoiceRegistered) "再登録失敗（以前の声紋は有効）" else "登録失敗"
+                    "ready" -> "登録済み（話者識別 ON）"
+                    else -> "未登録"
+                },
                 color = if (ui.ownerVoiceRegistered) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.bodyMedium,
             )
             Text(
-                "12秒間の声から端末内に声紋を作り、文字起こしを［オーナー］／［他人］で表示します。登録音声は保存しません。",
+                "スマホでは12秒間の声を録音して送るだけです。PCクライアントが声紋作成と［オーナー］／［他人］の判定を行います。",
                 style = MaterialTheme.typography.bodySmall,
             )
-            if (ui.serverTranscribe) {
+            if (!ui.account.loggedIn) {
+                Text("利用するには先にAIHelperへログインしてください。", style = MaterialTheme.typography.bodySmall)
+            } else if (!ui.serverTranscribe) {
                 Text(
-                    "※ 話者ラベルは現在「端末で処理」のときだけ付きます。",
+                    "※ 話者ラベルを付けるには「PCクライアントで処理」を選び、PCクライアントを起動してください。",
                     color = MaterialTheme.colorScheme.tertiary,
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -193,7 +201,7 @@ internal fun OwnerVoiceCard(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 Text(
-                    "録音中 ${(ui.ownerVoiceEnrollmentProgress * OwnerVoiceProfile.ENROLLMENT_SECONDS).toInt()} / ${OwnerVoiceProfile.ENROLLMENT_SECONDS}秒",
+                    "録音中 ${(ui.ownerVoiceEnrollmentProgress * OwnerVoiceEnrollmentRecorder.ENROLLMENT_SECONDS).toInt()} / ${OwnerVoiceEnrollmentRecorder.ENROLLMENT_SECONDS}秒",
                     style = MaterialTheme.typography.bodySmall,
                 )
                 OutlinedButton(onClick = onCancel) { Text("中止") }
@@ -201,7 +209,7 @@ internal fun OwnerVoiceCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
                         onClick = onEnroll,
-                        enabled = !service.active && !service.draining,
+                        enabled = ui.account.loggedIn && !service.active && !service.draining,
                     ) {
                         Text(if (ui.ownerVoiceRegistered) "声を再登録" else "声を登録")
                     }
@@ -253,13 +261,6 @@ internal fun StatusCard(service: ServiceState) {
                 Text("$pct%", style = MaterialTheme.typography.bodySmall)
             }
             service.modelName?.let { Text("モデル: $it") }
-            service.lastSpeaker?.let { speaker ->
-                val score = service.lastSpeakerSimilarity
-                Text(
-                    if (score != null) "直近の話者: $speaker（声紋一致度 ${(score * 100).toInt().coerceIn(0, 100)}%）"
-                    else "直近の話者: $speaker",
-                )
-            }
             Text("処理済: ${service.chunksDone} 区間  待機: ${service.queueSize} 区間")
             service.currentFile?.let { Text("最新の出力: $it") }
             if (service.lastText.isNotBlank()) {
@@ -321,7 +322,7 @@ internal fun ControlRow(
 /**
  * 文字起こし方法の選択カード。
  * 端末処理(Whisper)は遅い端末だと時間がかかるため、音声をサーバーへアップロードして
- * サーバー側で文字起こしするモードを選べる（AIHelper ログインが必要）。
+ * 音声をサーバー経由でPCクライアントへ渡して処理するモード（AIHelper ログインが必要）。
  */
 @Composable
 internal fun TranscribeModeCard(ui: UiState, onSetServerTranscribe: (Boolean) -> Unit) {
@@ -343,10 +344,10 @@ internal fun TranscribeModeCard(ui: UiState, onSetServerTranscribe: (Boolean) ->
                     enabled = ui.account.loggedIn
                 )
                 Column {
-                    Text("サーバーで処理（音声をアップロード）", style = MaterialTheme.typography.bodyMedium)
+                    Text("PCクライアントで処理（音声をアップロード）", style = MaterialTheme.typography.bodyMedium)
                     Text(
                         if (ui.account.loggedIn)
-                            "録音区間の音声をサーバーへ送り、サーバー側で文字起こし。処理状況はダッシュボードで確認できます。"
+                            "録音音声をサーバー経由でPCへ渡し、PCクライアントが文字起こしと話者識別を行います。"
                         else "利用するには先に「AI」タブで AIHelper にログインしてください。",
                         style = MaterialTheme.typography.bodySmall
                     )

@@ -74,6 +74,12 @@ class AiHelperClient {
         val createdAt: String,
     )
 
+    data class SpeakerProfileStatus(
+        val registered: Boolean,
+        val status: String,
+        val error: String?,
+    )
+
     /** 課題・予定の一覧を取得する。includeDone=true で完了済みも含める。 */
     fun fetchTasks(
         baseUrl: String, email: String, token: String, includeDone: Boolean,
@@ -546,6 +552,83 @@ class AiHelperClient {
             if (code in 200..299 && json.optBoolean("ok")) json.optLong("jobId")
             else throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
         }
+    }
+
+    /** 登録音声をサーバーへ送り、PCクライアントの声紋作成ジョブに積む。スマホでは解析しない。 */
+    fun uploadOwnerVoice(
+        baseUrl: String, email: String, token: String,
+        samples: ShortArray, sampleRate: Int,
+    ): kotlin.Result<Long> {
+        if (samples.isEmpty()) return kotlin.Result.failure(RuntimeException("登録音声がありません"))
+        val url = endpoint(baseUrl, "/api/speaker-profile")
+        val pcmBytes = samples.size.toLong() * 2
+        return runCatching {
+            val conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 20_000
+                readTimeout = 120_000
+                setFixedLengthStreamingMode(44L + pcmBytes)
+                setRequestProperty("Content-Type", "audio/wav")
+                setRequestProperty("Accept", "application/json")
+                setAuth(email, token)
+            }
+            conn.outputStream.use { out ->
+                out.write(wavHeader(pcmBytes, sampleRate))
+                val bytes = ByteArray(8192)
+                var offset = 0
+                while (offset < samples.size) {
+                    val count = minOf(bytes.size / 2, samples.size - offset)
+                    var bi = 0
+                    for (i in 0 until count) {
+                        val value = samples[offset + i].toInt()
+                        bytes[bi++] = (value and 0xFF).toByte()
+                        bytes[bi++] = ((value shr 8) and 0xFF).toByte()
+                    }
+                    out.write(bytes, 0, bi)
+                    offset += count
+                }
+            }
+            val (code, text) = readBody(conn)
+            val json = JSONObject(text)
+            if (code in 200..299 && json.optBoolean("ok")) json.optLong("jobId")
+            else throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+        }
+    }
+
+    fun fetchSpeakerProfileStatus(
+        baseUrl: String, email: String, token: String,
+    ): kotlin.Result<SpeakerProfileStatus> = runCatching {
+        val conn = (endpoint(baseUrl, "/api/speaker-profile").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            setRequestProperty("Accept", "application/json")
+            setAuth(email, token)
+        }
+        val (code, text) = readBody(conn)
+        val json = JSONObject(text)
+        if (code !in 200..299 || !json.optBoolean("ok")) {
+            throw RuntimeException(json.optString("error").ifBlank { "HTTP $code" })
+        }
+        SpeakerProfileStatus(
+            registered = json.optBoolean("registered"),
+            status = json.optString("status", "none"),
+            error = json.optString("error").ifBlank { null },
+        )
+    }
+
+    fun deleteSpeakerProfile(baseUrl: String, email: String, token: String): Result {
+        return runCatching {
+            val conn = (endpoint(baseUrl, "/api/speaker-profile").openConnection() as HttpURLConnection).apply {
+                requestMethod = "DELETE"
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                setRequestProperty("Accept", "application/json")
+                setAuth(email, token)
+            }
+            readResult(conn, onOk = "登録したオーナー声紋を削除しました")
+        }.getOrElse { Result.Error(it.message ?: "声紋の削除に失敗しました") }
     }
 
     /** PCM16/mono 用の WAV(RIFF) ヘッダ 44 バイトを組み立てる。 */

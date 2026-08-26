@@ -10,8 +10,6 @@ import com.ishilab.transcriber.net.AiHelperClient
 import com.ishilab.transcriber.net.BackgroundSync
 import com.ishilab.transcriber.service.AudioCaptureService
 import com.ishilab.transcriber.speaker.OwnerVoiceEnrollmentRecorder
-import com.ishilab.transcriber.speaker.OwnerVoiceProfile
-import com.ishilab.transcriber.speaker.OwnerVoiceProfileStore
 import com.ishilab.transcriber.google.CalendarEvent
 import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.google.android.gms.auth.api.signin.GoogleSignIn
@@ -100,8 +98,9 @@ data class UiState(
     val sttQuality: String = "high",
     val sttQualityBusy: Boolean = false,
     val sttQualityMessage: String? = null,
-    // オーナー声紋（登録音声は残さず、端末内の特徴量だけを保存）。
+    // オーナー声紋（スマホは登録音声の録音/送信のみ。作成・照合はPCクライアント）。
     val ownerVoiceRegistered: Boolean = false,
+    val ownerVoiceStatus: String = "none",
     val ownerVoiceEnrolling: Boolean = false,
     val ownerVoiceEnrollmentProgress: Float = 0f,
     val ownerVoiceMessage: String? = null,
@@ -115,7 +114,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val modelManager = ModelManager(app)
     private val accountStore = AccountStore(app)
     private val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(app)
-    private val ownerVoiceStore = OwnerVoiceProfileStore(app)
     private val AIHelper = AiHelperClient()
     private var foregroundSyncJob: Job? = null
     private var ownerVoiceEnrollmentJob: Job? = null
@@ -128,7 +126,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             it.copy(
                 account = currentAccount(),
                 serverTranscribe = accountStore.serverTranscribe,
-                ownerVoiceRegistered = ownerVoiceStore.exists(),
             )
         }
         refresh()
@@ -140,6 +137,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             loadServerTranscripts()
             loadChatHistory()
             loadSttQuality()
+            loadSpeakerProfileStatus()
         }
     }
 
@@ -215,6 +213,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             runCatching {
                 com.ishilab.transcriber.net.ReminderNotifier.poll(getApplication<Application>())
             }
+
+            runCatching {
+                AIHelper.fetchSpeakerProfileStatus(baseUrl, email, token).getOrThrow()
+            }.onSuccess(::applySpeakerProfileStatus)
         }
         syncCalendarSilently()
     }
@@ -252,11 +254,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * 12秒間の読み上げからオーナー声紋を登録する。録音データは処理後すぐ破棄し、
-     * 自動バックアップ対象外の端末領域には音響特徴量だけを保存する。
+     * スマホは12秒の登録音声を録音して送信するだけ。声紋作成はPCクライアントの
+     * speaker_enrollment ジョブとして行い、完了状態はサーバーから取得する。
      */
     fun enrollOwnerVoice() {
         if (ownerVoiceEnrollmentJob?.isActive == true) return
+        if (!accountStore.loggedIn) {
+            _ui.update { it.copy(ownerVoiceMessage = "先にAIHelperへログインしてください") }
+            return
+        }
         if (AudioCaptureService.state.value.active) {
             _ui.update { it.copy(ownerVoiceMessage = "通常の録音を終了してから声を登録してください") }
             return
@@ -275,18 +281,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         _ui.update { it.copy(ownerVoiceEnrollmentProgress = progress) }
                     }
                 }
-                val profile = withContext(Dispatchers.Default) {
-                    OwnerVoiceProfile.fromEnrollment(samples)
-                } ?: throw IllegalStateException(
-                    "声を十分に検出できませんでした。静かな場所で、12秒間はっきり話してください"
-                )
-                withContext(Dispatchers.IO) { ownerVoiceStore.save(profile) }
+                withContext(Dispatchers.IO) {
+                    AIHelper.uploadOwnerVoice(
+                        accountStore.baseUrl, accountStore.email, accountStore.token,
+                        samples, OwnerVoiceEnrollmentRecorder.SAMPLE_RATE,
+                    ).getOrThrow()
+                }
                 _ui.update {
                     it.copy(
-                        ownerVoiceRegistered = true,
+                        ownerVoiceStatus = "queued",
                         ownerVoiceEnrolling = false,
                         ownerVoiceEnrollmentProgress = 1f,
-                        ownerVoiceMessage = "オーナーの声を登録しました",
+                        ownerVoiceMessage = "登録音声を送信しました。PCクライアントの声紋作成待ちです",
                     )
                 }
             } catch (_: CancellationException) {
@@ -315,12 +321,49 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deleteOwnerVoice() {
         if (ownerVoiceEnrollmentJob?.isActive == true) return
-        ownerVoiceStore.delete()
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                AIHelper.deleteSpeakerProfile(accountStore.baseUrl, accountStore.email, accountStore.token)
+            }
+            _ui.update {
+                when (result) {
+                    is AiHelperClient.Result.Ok -> it.copy(
+                        ownerVoiceRegistered = false,
+                        ownerVoiceStatus = "none",
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = result.message,
+                    )
+                    is AiHelperClient.Result.Error -> it.copy(ownerVoiceMessage = result.message)
+                }
+            }
+        }
+    }
+
+    fun loadSpeakerProfileStatus() {
+        if (!accountStore.loggedIn) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                AIHelper.fetchSpeakerProfileStatus(
+                    accountStore.baseUrl, accountStore.email, accountStore.token,
+                )
+            }.onSuccess(::applySpeakerProfileStatus)
+        }
+    }
+
+    private fun applySpeakerProfileStatus(status: AiHelperClient.SpeakerProfileStatus) {
+        val message = when (status.status) {
+            "queued" -> "PCクライアントの処理待ちです"
+            "processing" -> "PCクライアントが声紋を作成中です"
+            "error" -> status.error ?: "声紋作成に失敗しました"
+            "ready" -> "PCクライアントでオーナー声紋の登録が完了しました"
+            else -> null
+        }
         _ui.update {
             it.copy(
-                ownerVoiceRegistered = false,
-                ownerVoiceEnrollmentProgress = 0f,
-                ownerVoiceMessage = "登録した声紋を削除しました",
+                ownerVoiceRegistered = status.registered,
+                ownerVoiceStatus = status.status,
+                ownerVoiceMessage = message,
             )
         }
     }
@@ -394,6 +437,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     loadChatHistory()
                     loadMoodle()
                     loadSttQuality()
+                    loadSpeakerProfileStatus()
                     refreshGoogle()
                 },
                 onFailure = { e ->
@@ -414,6 +458,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 courses = emptyList(), coursesError = null, coursesLoading = false,
                 summary = null, summaryError = null,
                 sttQuality = "high", sttQualityMessage = null,
+                ownerVoiceRegistered = false, ownerVoiceStatus = "none", ownerVoiceMessage = null,
                 serverTranscripts = emptyList(),
                 serverTranscriptsLoading = false,
                 serverTranscriptsError = null,
