@@ -1,7 +1,8 @@
 // 資格情報の暗号鍵ローテーション用スクリプト。
 //
 // 背景: 旧 .cred-key は git 履歴に残ってしまっているため「漏洩済み」とみなす。
-// この鍵で暗号化された Waseda パスワードと Google refresh_token は、履歴を消しても
+// この鍵で暗号化された Waseda パスワード、Google refresh_token、Geminiキー、
+// オーナー話者プロファイルは、履歴を消しても
 // 過去に clone した相手なら復号できる。そこで新しい鍵で全件を再暗号化し、旧鍵を無効化する。
 //
 // 使い方:
@@ -128,6 +129,18 @@ async function main() {
       }
     }
     console.log(`Gemini APIキー: ${krows.length} 件を確認`);
+
+    // 4) PCクライアントが作成したオーナー話者プロファイル
+    const [srows] = await pool.query(
+      "SELECT email, profile_enc FROM speaker_profiles WHERE profile_enc IS NOT NULL AND profile_enc <> ''"
+    );
+    for (const r of srows) {
+      const next = reencrypt(r.profile_enc, oldKey, newKey, counters);
+      if (next && !DRY_RUN) {
+        await pool.query("UPDATE speaker_profiles SET profile_enc = ? WHERE email = ?", [next, r.email]);
+      }
+    }
+    console.log(`話者プロファイル: ${srows.length} 件を確認`);
 
     console.log(
       `${DRY_RUN ? "[dry-run] " : ""}再暗号化: ${counters.converted} 件 / スキップ(旧鍵で解けず): ${counters.skipped} 件`

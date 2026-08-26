@@ -154,6 +154,7 @@ async function ensureSchema() {
       stored_path   VARCHAR(1024) NOT NULL,
       mime          VARCHAR(128) NULL,
       size_bytes    BIGINT       NOT NULL DEFAULT 0,
+      job_type      VARCHAR(32)  NOT NULL DEFAULT 'transcription',
       status        VARCHAR(16)  NOT NULL DEFAULT 'queued',
       error         TEXT         NULL,
       transcript_id INT          NULL,
@@ -172,6 +173,20 @@ async function ensureSchema() {
   // 処理を試みた回数（claim のたびに +1）。失敗時は上限までは自動で queued に戻して
   // 再割り振りし、上限を超えたら error で保留する（音声ファイルは残るので手動再試行できる）。
   await addColumnIfMissing("audio_jobs", "attempts", "INT NOT NULL DEFAULT 0");
+  // transcription=通常文字起こし、speaker_enrollment=オーナー声紋作成。
+  await addColumnIfMissing("audio_jobs", "job_type", "VARCHAR(32) NOT NULL DEFAULT 'transcription'");
+
+  // PCワーカーが登録音声から作った話者埋め込み。profile_enc は cred.js の
+  // AES-256-GCM で暗号化し、登録音声そのものはジョブ完了時に削除する。
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS speaker_profiles (
+      email         VARCHAR(255) NOT NULL PRIMARY KEY,
+      profile_enc   LONGTEXT     NOT NULL,
+      model_version VARCHAR(128) NOT NULL,
+      created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+  `);
 
   // 音声ジョブを処理するワーカーPC（クライアント）。クライアントが初回起動時に
   // UUID（client_uuid）と表示名を自分で決めてサーバーへ登録する。以後の全リクエストは
@@ -884,11 +899,11 @@ async function deleteAudioWorker(email, id) {
 // 音声文字起こしジョブ（audio_jobs）
 // =====================================================================
 
-async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
+async function createAudioJob(email, filename, storedPath, mime, sizeBytes, jobType = "transcription") {
   const [r] = await pool.query(
-    `INSERT INTO audio_jobs (email, filename, stored_path, mime, size_bytes)
-     VALUES (?, ?, ?, ?, ?)`,
-    [email, filename, storedPath, mime || null, sizeBytes || 0]
+    `INSERT INTO audio_jobs (email, filename, stored_path, mime, size_bytes, job_type)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [email, filename, storedPath, mime || null, sizeBytes || 0, jobType]
   );
   return r.insertId;
 }
@@ -926,7 +941,7 @@ async function claimNextAudioJob(email = null, workerId = null, { respectPrefs =
     );
     if (!r.affectedRows) return null;
     const [rows] = await conn.query(
-      `SELECT id, email, filename, stored_path, mime, size_bytes, created_at
+      `SELECT id, email, filename, stored_path, mime, size_bytes, job_type, created_at
        FROM audio_jobs WHERE id = LAST_INSERT_ID()`
     );
     return rows[0] || null;
@@ -944,7 +959,8 @@ async function claimNextAudioJob(email = null, workerId = null, { respectPrefs =
 async function getClaimedAudioJob(email, id, workerId) {
   if (!workerId) return null;
   const [rows] = await pool.query(
-    `SELECT j.id, j.email, j.filename, j.stored_path, j.mime, j.size_bytes, j.status, j.claimed_by
+    `SELECT j.id, j.email, j.filename, j.stored_path, j.mime, j.size_bytes, j.job_type,
+            j.status, j.claimed_by
      FROM audio_jobs j
      JOIN audio_workers w ON w.id = j.claimed_by
      WHERE j.id = ? AND j.status = 'processing' AND j.claimed_by = ? AND w.email = ?
@@ -1033,7 +1049,7 @@ async function listAudioJobs(email, { limit = 30, activeOnly = false } = {}) {
             j.created_at, j.updated_at, j.claimed_by, w.name AS worker_name
      FROM audio_jobs j
      LEFT JOIN audio_workers w ON w.id = j.claimed_by
-     WHERE j.email = ? ${statusCond} ORDER BY j.id DESC LIMIT ?`,
+     WHERE j.email = ? AND j.job_type = 'transcription' ${statusCond} ORDER BY j.id DESC LIMIT ?`,
     [email, Number(limit) || 30]
   );
   return rows;
@@ -1055,6 +1071,110 @@ async function requeueStaleAudioJobs(staleMinutes = null) {
       `UPDATE audio_jobs SET status = 'queued', claimed_by = NULL WHERE status = 'processing'`
     );
   return r.affectedRows;
+}
+
+// =====================================================================
+// オーナー話者プロファイル
+// =====================================================================
+
+/**
+ * 登録ジョブの完了と声紋保存を同一トランザクションで行う。
+ * 古い処理中ジョブが新しい再登録より後に完了しても、新しい声紋を上書きしない。
+ * 削除APIも audio_jobs をロックするため、削除と競合して声紋だけ復活することも防ぐ。
+ */
+async function finishSpeakerEnrollmentJob(id, email, profileEnc, modelVersion) {
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [currentRows] = await conn.query(
+      `SELECT id FROM audio_jobs
+       WHERE id = ? AND email = ? AND job_type = 'speaker_enrollment' AND status = 'processing'
+       FOR UPDATE`,
+      [Number(id), email]
+    );
+    if (!currentRows.length) {
+      await conn.rollback();
+      return { found: false, saved: false };
+    }
+    const [latestRows] = await conn.query(
+      `SELECT id FROM audio_jobs
+       WHERE email = ? AND job_type = 'speaker_enrollment'
+       ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      [email]
+    );
+    const isLatest = Number(latestRows[0]?.id) === Number(id);
+    if (isLatest) {
+      await conn.query(
+        `INSERT INTO speaker_profiles (email, profile_enc, model_version)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE profile_enc = VALUES(profile_enc),
+           model_version = VALUES(model_version), updated_at = CURRENT_TIMESTAMP`,
+        [email, profileEnc, modelVersion]
+      );
+    }
+    await conn.query(
+      `UPDATE audio_jobs SET status = 'done', error = NULL WHERE id = ?`,
+      [Number(id)]
+    );
+    await conn.commit();
+    return { found: true, saved: isLatest };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+}
+
+async function getSpeakerProfile(email) {
+  const [rows] = await pool.query(
+    `SELECT profile_enc, model_version, updated_at FROM speaker_profiles WHERE email = ? LIMIT 1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
+async function deleteSpeakerProfile(email) {
+  const [r] = await pool.query(`DELETE FROM speaker_profiles WHERE email = ?`, [email]);
+  return r.affectedRows;
+}
+
+async function latestSpeakerEnrollmentJob(email) {
+  const [rows] = await pool.query(
+    `SELECT id, status, error, created_at, updated_at FROM audio_jobs
+     WHERE email = ? AND job_type = 'speaker_enrollment'
+     ORDER BY id DESC LIMIT 1`,
+    [email]
+  );
+  return rows[0] || null;
+}
+
+/** 削除・再登録用。該当ジョブの音声パスを返してから行を消す。 */
+async function deleteSpeakerEnrollmentJobs(email, { includeProcessing = false } = {}) {
+  const status = includeProcessing ? "" : "AND status <> 'processing'";
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [rows] = await conn.query(
+      `SELECT id, stored_path FROM audio_jobs
+       WHERE email = ? AND job_type = 'speaker_enrollment' ${status} FOR UPDATE`,
+      [email]
+    );
+    if (rows.length) {
+      const placeholders = rows.map(() => "?").join(",");
+      await conn.query(
+        `DELETE FROM audio_jobs WHERE id IN (${placeholders})`,
+        rows.map((row) => row.id)
+      );
+    }
+    await conn.commit();
+    return rows;
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
 }
 
 // =====================================================================
@@ -1496,6 +1616,11 @@ module.exports = {
   deleteAudioJob,
   listAudioJobs,
   requeueStaleAudioJobs,
+  finishSpeakerEnrollmentJob,
+  getSpeakerProfile,
+  deleteSpeakerProfile,
+  latestSpeakerEnrollmentJob,
+  deleteSpeakerEnrollmentJobs,
   // summaries
   saveDailySummary,
   getDailySummary,

@@ -100,6 +100,9 @@ npm start
 既定で10秒ごとに `POST /api/client/claim` でジョブを1件確保し、
 `POST /api/client/jobs/download`（JSONリクエスト → WAV応答）で音声をダウンロードして
 このPCで Whisper 処理を行い、`POST /api/client/jobs/result` へ `jobId` と文字起こし結果を返す。
+オーナー声登録の `speaker_enrollment` ジョブでは、同じPCがSpeechBrain ECAPAで
+話者埋め込みを作成して `speakerProfile` を返す。通常ジョブではその声紋と
+WhisperセグメントをPC側で照合し、`[オーナー]` / `[他人]` ラベルを付ける。
 ダウンロード・結果送信は「その clientId のワーカーが自分で claim したジョブ」しか受け付けないため、
 別クライアントを名乗っても他人の音声は取得できない。ポーリング間隔は
 `AUDIO_WORKER_POLL_SEC=10` で変更できる。
@@ -121,7 +124,7 @@ make run
 **各ユーザーが自分で登録する**。[Google AI Studio](https://aistudio.google.com/apikey) で発行し、
 ダッシュボードの「アカウント」タブから登録する（登録時に疎通確認あり）。
 キーは AES-256-GCM で暗号化して `users.gemini_api_key_enc` に保存され、鍵ローテーションは
-`rotate-cred-key.js` が Waseda パスワード・Google refresh_token と一緒に面倒を見る。
+`rotate-cred-key.js` が Waseda パスワード・Google refresh_token・話者プロファイルと一緒に面倒を見る。
 キー未登録のユーザーは AI 機能（チャット・課題/予定抽出・要約・資料要約）が使えず、
 音声の文字起こし自体はキー無しでも動く（解析だけスキップされる）。
 
@@ -167,11 +170,12 @@ make run
 | POST | `/api/login` | アカウント＋トークンの照合（LINE 連携状況も返す） |
 | POST | `/api/upload` | 文字起こし受信 → 保存 → Gemini で課題/予定/要約を抽出 |
 | POST | `/api/audio` | 音声ファイル受信 → 音声ジョブとしてキュー化 |
+| POST/GET/DELETE | `/api/speaker-profile` | オーナー登録音声のキュー化 / 登録状態 / 声紋削除 |
 | GET | `/api/audio/jobs` | 音声ジョブ一覧（`?active=1` で未処理・処理中・失敗のみ） |
 | POST | `/api/client/register` | ワーカーPCのクライアント登録（clientId=UUID + 表示名。初回セットアップ） |
 | POST | `/api/client/claim` | 外部PCワーカーが音声ジョブを1件確保（JSONボディ認証） |
 | POST | `/api/client/jobs/download` | claim 済みジョブの音声本体を取得（`{auth, clientId, jobId}` → バイナリ） |
-| POST | `/api/client/jobs/result` | 文字起こし結果またはエラーを返す（`{auth, clientId, jobId, text\|error}`） |
+| POST | `/api/client/jobs/result` | 文字起こし、話者プロファイル、またはエラーを返す（`text\|speakerProfile\|error`） |
 | POST | `/api/client/metrics` | ワーカーPCの使用率報告と処理中ジョブのハートビート |
 | GET | `/api/transcripts` | ログイン中ユーザーの文字起こし一覧（`?contains=語` で本文全文検索） |
 | GET | `/api/transcripts/:id` | ログイン中ユーザーの文字起こし本文 |

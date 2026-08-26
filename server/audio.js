@@ -18,6 +18,7 @@ const path = require("path");
 const db = require("./db");
 const gemini = require("./gemini");
 const reminders = require("./reminders");
+const { encryptCred, decryptCred } = require("./cred");
 
 const AUDIO_DIR = path.join(__dirname, "uploads", "audio");
 // 処理中ジョブのハートビート（クライアントが3秒ごとのメトリクスに載せる activeJobId）が
@@ -33,13 +34,27 @@ function ensureDir() {
 }
 
 // アップロードされた音声を保存してジョブ登録し、ジョブ ID を返す。
-async function enqueue(email, filename, buffer, mime) {
+async function enqueue(email, filename, buffer, mime, jobType = "transcription") {
   ensureDir();
   const safe = path.basename(filename).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
   const stored = path.join(AUDIO_DIR, `${Date.now()}-${safe}`);
   fs.writeFileSync(stored, buffer);
-  const id = await db.createAudioJob(email, safe, stored, mime, buffer.length);
-  return id;
+  try {
+    return await db.createAudioJob(email, safe, stored, mime, buffer.length, jobType);
+  } catch (e) {
+    // DB登録に失敗した音声だけがディスクへ孤児として残らないようにする。
+    try { fs.unlinkSync(stored); } catch (_unlinkError) { /* 元のDBエラーを返す */ }
+    throw e;
+  }
+}
+
+/** スマホで録音した登録音声を、PCワーカーが声紋へ変換する専用ジョブとして積む。 */
+async function enqueueSpeakerEnrollment(email, buffer, mime) {
+  // 待機中/失敗中の古い再登録は置き換える。処理中ジョブはワーカーに渡っているため残すが、
+  // 完了時のDBトランザクションが最新ジョブ以外の声紋上書きを防ぐ。
+  const old = await db.deleteSpeakerEnrollmentJobs(email);
+  for (const row of old) fs.unlink(row.stored_path, () => {});
+  return enqueue(email, `owner-voice-${Date.now()}.wav`, buffer, mime, "speaker_enrollment");
 }
 
 async function finishJobWithText(job, text) {
@@ -114,13 +129,25 @@ async function claimRemoteJob(email, workerId, { global = false } = {}) {
   if (!job) return null;
   // 音声認識クオリティはジョブ所有者の設定に従う（globalでは処理PCの持ち主と異なる）。
   const quality = await db.getSttQuality(job.email).catch(() => "high");
-  return {
+  const result = {
     id: job.id,
     filename: job.filename,
     mime: job.mime || "audio/wav",
     sizeBytes: job.size_bytes || 0,
     quality,
+    jobType: job.job_type || "transcription",
   };
+  if (result.jobType === "transcription") {
+    const stored = await db.getSpeakerProfile(job.email).catch(() => null);
+    if (stored?.profile_enc) {
+      try {
+        result.speakerProfile = JSON.parse(decryptCred(stored.profile_enc));
+      } catch (e) {
+        console.error(`話者プロファイルの復号に失敗 (${job.email}):`, e.message);
+      }
+    }
+  }
+  return result;
 }
 
 // claim 済みジョブの取得。workerId は必須で、認証アカウント所有のワーカーが
@@ -136,7 +163,28 @@ async function getClaimedJob(email, id, workerId) {
   return job;
 }
 
-async function completeRemoteJob(email, id, { text, error, workerId } = {}) {
+function validateSpeakerProfile(raw) {
+  if (!raw || typeof raw !== "object") throw new Error("話者プロファイルがありません");
+  const version = String(raw.version || "");
+  const embedding = Array.isArray(raw.embedding) ? raw.embedding : [];
+  const threshold = raw.threshold;
+  if (!version || version.length > 128 || !/^[A-Za-z0-9._:/-]+$/.test(version) ||
+      embedding.length < 64 || embedding.length > 1024 ||
+      embedding.some((v) => typeof v !== "number") ||
+      embedding.some((v) => !Number.isFinite(v) || Math.abs(v) > 100)) {
+    throw new Error("話者プロファイルの形式が不正です");
+  }
+  const norm = Math.sqrt(embedding.reduce((sum, v) => sum + v * v, 0));
+  if (!Number.isFinite(norm) || norm < 0.5 || norm > 1.5) {
+    throw new Error("話者プロファイルが正規化されていません");
+  }
+  if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < -1 || threshold > 1) {
+    throw new Error("話者判定しきい値が不正です");
+  }
+  return { version, embedding, threshold };
+}
+
+async function completeRemoteJob(email, id, { text, error, speakerProfile, workerId } = {}) {
   const job = await getClaimedJob(email, id, workerId);
   if (!job) return { ok: false, status: 404, error: "処理中の音声ジョブが見つかりません" };
   if (error) {
@@ -144,6 +192,22 @@ async function completeRemoteJob(email, id, { text, error, workerId } = {}) {
     return { ok: true, status: failed?.status || "error" };
   }
   try {
+    if (job.job_type === "speaker_enrollment") {
+      const profile = validateSpeakerProfile(speakerProfile);
+      const completed = await db.finishSpeakerEnrollmentJob(
+        job.id, job.email, encryptCred(JSON.stringify(profile)), profile.version
+      );
+      if (!completed.found) {
+        return { ok: false, status: 404, error: "登録ジョブは削除されました" };
+      }
+      fs.unlink(job.stored_path, () => {});
+      if (completed.saved) {
+        console.log(`オーナー話者プロファイル作成完了: #${job.id} ${job.email} (${profile.version})`);
+      } else {
+        console.log(`古いオーナー声登録を破棄: #${job.id} ${job.email}`);
+      }
+      return { ok: true, status: "done", speakerProfileReady: completed.saved };
+    }
     const result = await finishJobWithText(job, text || "");
     return { ok: true, status: "done", ...result };
   } catch (e) {
@@ -151,6 +215,27 @@ async function completeRemoteJob(email, id, { text, error, workerId } = {}) {
     await failJob(job.id, e.message);
     return { ok: false, status: 500, error: e.message };
   }
+}
+
+async function speakerProfileStatus(email) {
+  const [profile, job] = await Promise.all([
+    db.getSpeakerProfile(email),
+    db.latestSpeakerEnrollmentJob(email),
+  ]);
+  const activeStatus = job && ["queued", "processing", "error"].includes(job.status)
+    ? job.status : null;
+  return {
+    registered: Boolean(profile),
+    status: activeStatus || (profile ? "ready" : "none"),
+    error: activeStatus === "error" ? (job.error || "声紋作成に失敗しました") : null,
+    updatedAt: profile?.updated_at || null,
+  };
+}
+
+async function deleteSpeakerProfileData(email) {
+  const rows = await db.deleteSpeakerEnrollmentJobs(email, { includeProcessing: true });
+  for (const row of rows) fs.unlink(row.stored_path, () => {});
+  await db.deleteSpeakerProfile(email);
 }
 
 // 処理失敗の共通処理。上限までは queued に戻して即再割り振り、超えたら error で保留。
@@ -215,10 +300,13 @@ function start() {
 
 module.exports = {
   enqueue,
+  enqueueSpeakerEnrollment,
   start,
   claimRemoteJob,
   getClaimedJob,
   completeRemoteJob,
   retryJob,
   deleteJob,
+  speakerProfileStatus,
+  deleteSpeakerProfileData,
 };
