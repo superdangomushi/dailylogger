@@ -23,6 +23,7 @@ struct AiSettingsView: View {
                     GoogleCalendarCard()
 
                     if viewModel.ui.account.loggedIn {
+                        GeminiIntervalCard()
                         MoodleCard()
                         WasedaCard()
                         DigestCard()
@@ -535,5 +536,45 @@ struct DigestCard: View {
                     .buttonStyle(.bordered)
             }
         }
+    }
+}
+
+/// Gemini 解析の最小間隔（分）を設定するカード。
+/// 音声の文字起こしが届いても前回の解析から指定時間が経っていなければ Gemini の呼び出しをスキップする。
+/// 0 にすると届くたびに毎回解析する（API コストが高くなるので注意）。
+struct GeminiIntervalCard: View {
+    @EnvironmentObject var viewModel: MainViewModel
+    @State private var minutes: Int = 60
+
+    var body: some View {
+        CardView {
+            Text("Gemini 解析の間隔").font(.headline)
+            Text("音声の文字起こしが届いたとき、Gemini による課題・予定の抽出を行う最小間隔です。0 にすると届くたびに毎回解析します（API コストが上がります）。")
+                .font(.caption)
+            HStack {
+                Text("解析の間隔")
+                Spacer()
+                Stepper(intervalLabel, value: $minutes, in: 0...1440)
+                    .fixedSize()
+                    .disabled(viewModel.ui.geminiIntervalBusy)
+                    .onChange(of: minutes) { v in
+                        viewModel.setGeminiInterval(v)
+                    }
+            }
+            if viewModel.ui.geminiIntervalBusy {
+                ProgressView().frame(maxWidth: .infinity)
+            }
+            if let msg = viewModel.ui.geminiIntervalMessage {
+                Text(msg).font(.caption)
+            }
+        }
+        .onAppear { minutes = viewModel.ui.geminiIntervalMin }
+        .onChange(of: viewModel.ui.geminiIntervalMin) { v in minutes = v }
+    }
+
+    private var intervalLabel: String {
+        if minutes == 0 { return "毎回解析" }
+        if minutes >= 60 && minutes % 60 == 0 { return "\(minutes / 60)時間" }
+        return "\(minutes) 分"
     }
 }

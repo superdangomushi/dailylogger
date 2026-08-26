@@ -783,6 +783,38 @@ app.post("/api/gemini-auto", async (req, res) => {
   }
 });
 
+// Gemini 解析の最小間隔（分）。音声文字起こしが届いても前回解析から指定時間未満の場合はスキップ。
+// 0 は届くたびに毎回解析（旧来の動作）。
+app.get("/api/gemini-interval", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  try {
+    const minutes = await db.getGeminiInterval(account.email);
+    res.json({ ok: true, minutes });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
+app.post("/api/gemini-interval", async (req, res) => {
+  const account = await authFromReq(req);
+  if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });
+  const raw = req.body?.minutes;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) {
+    return res.status(400).json({ ok: false, error: "minutes は 0〜1440 の整数で指定してください（0 = 毎回解析）" });
+  }
+  try {
+    const n = await db.setGeminiInterval(account.email, minutes);
+    if (!n) {
+      return res.status(400).json({ ok: false, error: "このアカウントでは設定を保存できません（Web登録のアカウントでログインしてください）" });
+    }
+    res.json({ ok: true, minutes: Math.floor(minutes) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: serverErr(e) });
+  }
+});
+
 app.post("/api/moodle", async (req, res) => {
   const account = await authFromReq(req);
   if (!account) return res.status(401).json({ ok: false, error: "認証エラー" });

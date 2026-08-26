@@ -34,6 +34,16 @@ final class AccountStore {
         set { prefs.set(newValue, forKey: Keys.serverTranscribe) }
     }
 
+    /// 録音区間の長さ（分）。この時間ごとに音声を文字起こし（またはサーバーへアップロード）する。
+    /// 1〜240 の範囲で 1 分単位で調整可能。デフォルトは 60 分。
+    var segmentIntervalMinutes: Int {
+        get {
+            let v = prefs.integer(forKey: Keys.segmentIntervalMinutes)
+            return v <= 0 ? 60 : max(1, min(240, v))
+        }
+        set { prefs.set(max(1, min(240, newValue)), forKey: Keys.segmentIntervalMinutes) }
+    }
+
     /// ログイン成功時に呼ぶ。以後の送信で使う認証情報を確定させる。
     func save(baseUrl: String, email: String, token: String) {
         prefs.set(baseUrl, forKey: Keys.baseUrl)
@@ -53,5 +63,6 @@ final class AccountStore {
         static let token = "AIHelper.token"
         static let loggedIn = "AIHelper.logged_in"
         static let serverTranscribe = "AIHelper.server_transcribe"
+        static let segmentIntervalMinutes = "AIHelper.segment_interval_min"
     }
 }

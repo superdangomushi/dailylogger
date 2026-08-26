@@ -64,23 +64,47 @@ async function finishJobWithText(job, text) {
   // 「解析する」ボタンからの手動実行に任せる。
   const geminiAuto = await db.getGeminiAuto(job.email).catch(() => true);
   if (geminiAuto) {
+    // 間隔チェック: gemini_interval_min > 0 のとき、前回分析から十分な時間が経っていなければスキップ。
+    let shouldAnalyze = true;
     try {
-      if (!(await gemini.isConfiguredFor(job.email))) {
-        throw new Error(gemini.NO_KEY_MESSAGE);
-      }
-      const result = await gemini.analyze(job.email, body);
-      await db.saveAnalysis(transcriptId, result.kadai, result.yotei, result.summary);
-      await db.upsertTasks(job.email, result.tasks, transcriptId);
-      const updated = await db.applyTaskUpdates(job.email, result.updates);
-      const canceled = await db.cancelTasks(job.email, result.cancellations);
-      if (updated.length) {
-        console.log(`音声ジョブ #${job.id} で予定/課題を ${updated.length} 件変更しました`);
-      }
-      if (canceled.length) {
-        console.log(`音声ジョブ #${job.id} で予定/課題を ${canceled.length} 件削除しました`);
+      const intervalMin = await db.getGeminiInterval(job.email).catch(() => 60);
+      if (intervalMin > 0) {
+        const lastAt = await db.getGeminiLastAnalyzedAt(job.email).catch(() => null);
+        if (lastAt) {
+          const elapsedMin = (Date.now() - new Date(lastAt).getTime()) / 60_000;
+          if (elapsedMin < intervalMin) {
+            console.log(
+              `音声ジョブ #${job.id}: Gemini 解析間隔 ${intervalMin} 分未満（${Math.floor(elapsedMin)} 分経過）のためスキップ`
+            );
+            shouldAnalyze = false;
+          }
+        }
       }
     } catch (e) {
-      console.error(`音声ジョブ #${job.id} の解析に失敗:`, e.message);
+      console.error(`音声ジョブ #${job.id} の Gemini 間隔チェックに失敗（解析を続行）:`, e.message);
+    }
+
+    if (shouldAnalyze) {
+      try {
+        if (!(await gemini.isConfiguredFor(job.email))) {
+          throw new Error(gemini.NO_KEY_MESSAGE);
+        }
+        const result = await gemini.analyze(job.email, body);
+        await db.saveAnalysis(transcriptId, result.kadai, result.yotei, result.summary);
+        await db.upsertTasks(job.email, result.tasks, transcriptId);
+        const updated = await db.applyTaskUpdates(job.email, result.updates);
+        const canceled = await db.cancelTasks(job.email, result.cancellations);
+        if (updated.length) {
+          console.log(`音声ジョブ #${job.id} で予定/課題を ${updated.length} 件変更しました`);
+        }
+        if (canceled.length) {
+          console.log(`音声ジョブ #${job.id} で予定/課題を ${canceled.length} 件削除しました`);
+        }
+        // 分析成功時に最終分析時刻を更新（次回の間隔チェックの基準点）。
+        await db.touchGeminiLastAnalyzedAt(job.email).catch(() => {});
+      } catch (e) {
+        console.error(`音声ジョブ #${job.id} の解析に失敗:`, e.message);
+      }
     }
   }
 

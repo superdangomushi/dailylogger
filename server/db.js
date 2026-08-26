@@ -228,6 +228,11 @@ async function ensureSchema() {
   // Gemini の自動解析（課題/予定抽出・要約）を文字起こし保存時に自動で走らせるか。
   // 0 のときは自動では走らず、ダッシュボードの「解析する」ボタンで手動実行する。
   await addColumnIfMissing("users", "gemini_auto", "TINYINT(1) NOT NULL DEFAULT 1");
+  // Gemini 解析の最小間隔（分）。音声ジョブが完了しても前回分析から指定分未満ならスキップ。
+  // 0 は届くたびに毎回解析する（従来の動作）。
+  await addColumnIfMissing("users", "gemini_interval_min", "INT NOT NULL DEFAULT 60");
+  // 最後に Gemini 解析を実行した時刻。間隔チェックの基準点として使う。
+  await addColumnIfMissing("users", "gemini_last_analyzed_at", "DATETIME NULL");
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
   await addColumnIfMissing("users", "google_email", "VARCHAR(255) NULL");
   // Web(OAuth) で連携した Google アカウント（1ユーザーに複数可）。
@@ -1203,6 +1208,38 @@ async function getGeminiAuto(email) {
   return rows[0] ? Boolean(rows[0].gemini_auto) : true;
 }
 
+// Gemini 解析の最小間隔（分）。0 = 毎回実行（旧来の動作）。
+async function getGeminiInterval(email) {
+  const [rows] = await pool.query(
+    `SELECT gemini_interval_min FROM users WHERE email = ? LIMIT 1`, [email]
+  );
+  if (!rows[0]) return 60;
+  const v = Number(rows[0].gemini_interval_min);
+  return Number.isFinite(v) ? v : 60;
+}
+
+async function setGeminiInterval(email, minutes) {
+  const v = Math.max(0, Math.min(1440, Math.floor(Number(minutes))));
+  const [r] = await pool.query(
+    `UPDATE users SET gemini_interval_min = ? WHERE email = ?`, [v, email]
+  );
+  return r.affectedRows;
+}
+
+// 最後に Gemini 解析を実行した時刻（間隔チェック用）。
+async function getGeminiLastAnalyzedAt(email) {
+  const [rows] = await pool.query(
+    `SELECT gemini_last_analyzed_at FROM users WHERE email = ? LIMIT 1`, [email]
+  );
+  return rows[0]?.gemini_last_analyzed_at || null;
+}
+
+async function touchGeminiLastAnalyzedAt(email) {
+  await pool.query(
+    `UPDATE users SET gemini_last_analyzed_at = NOW() WHERE email = ?`, [email]
+  );
+}
+
 // ユーザーごとの Gemini API キー（暗号化済み文字列を保存。暗号化/復号は呼び出し側）。
 async function setGeminiKeyEnc(email, enc) {
   const [r] = await pool.query(
@@ -1433,6 +1470,10 @@ module.exports = {
   getGeminiKeyEnc,
   setGeminiAuto,
   getGeminiAuto,
+  getGeminiInterval,
+  setGeminiInterval,
+  getGeminiLastAnalyzedAt,
+  touchGeminiLastAnalyzedAt,
   listUsersWithMoodle,
   setWasedaCreds,
   getWasedaCreds,

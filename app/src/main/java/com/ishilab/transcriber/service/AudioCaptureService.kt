@@ -298,9 +298,13 @@ class AudioCaptureService : Service() {
                 val n = record.read(readBuf, 0, readBuf.size)
                 if (n > 0) {
                     segWriter?.append(readBuf, n)
-                    // 実時刻の「時」が変わったら、直前1時間ぶんを確定して文字起こしへ回す。
-                    val key = hourKey(System.currentTimeMillis())
-                    if (key != segHourKey) rotateSegment()
+                    // 時刻の「時」が変わった、または設定した区間の長さが経過したら区間を確定して文字起こしへ回す。
+                    val nowMs = System.currentTimeMillis()
+                    val key = hourKey(nowMs)
+                    val intervalMs = accountStore.segmentIntervalMinutes.toLong() * 60_000L
+                    if (key != segHourKey || (segStartMillis > 0L && nowMs - segStartMillis >= intervalMs)) {
+                        rotateSegment()
+                    }
                 }
             }
             // 一時停止/停止では区間を閉じない（stop 側で finalizeSegment する）。
@@ -521,7 +525,11 @@ class AudioCaptureService : Service() {
             s.draining -> "送信待ち（未送信を送信中）"
             s.transcribing -> "音声を文字起こし中"
             s.paused -> "一時停止中（マイク解放）"
-            else -> "録音中（1時間ごと/終了時にまとめて文字起こし）"
+            else -> {
+                val min = accountStore.segmentIntervalMinutes
+                val label = if (min >= 60 && min % 60 == 0) "${min / 60}時間" else "${min}分"
+                "録音中（${label}ごと/終了時にまとめて文字起こし）"
+            }
         }
         val body = buildString {
             if (s.transcribing) {
