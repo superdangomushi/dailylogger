@@ -1,7 +1,7 @@
 # client/ コードマップ（ワーカーPC側）
 
 ワーカーPCで動かすクライアント一式。サーバーの音声ジョブをポーリングし、
-ローカルの faster-whisper で文字起こしして結果を返す。
+ローカルの faster-whisper で文字起こしし、SpeechBrain ECAPAで登録声の声紋作成と話者識別を行って結果を返す。
 
 本体は C++ の単一バイナリ `audio-worker`（通信・ポーリング・メトリクス・ローカル管理UI）。
 音声認識だけは従来どおり Python（`stt/transcribe.py`）を子プロセスで呼ぶ。
@@ -22,7 +22,7 @@ JS版（`audio-worker.js` / `stt-local.js`）は 2026-07 に C++ へ置き換え
 | `cpp/src/stt.hpp` | `stt/transcribe.py` の子プロセス起動（fork/exec + pipe、2時間タイムアウト） |
 | `cpp/src/util.hpp` | 時刻ISO文字列・UUID v4生成・文字列処理などの小物 |
 | `cpp/third_party/` | vendor した cpp-httplib / nlohmann-json（ともにMIT、単一ヘッダ） |
-| `stt/transcribe.py` | faster-whisper 実行本体（Python。`stt/.venv` 内で動く） |
+| `stt/transcribe.py` | faster-whisper文字起こし + SpeechBrain ECAPA声紋作成・照合 |
 | `accounts.json` | 設定ファイル（git管理外）。下記参照 |
 | `Makefile` | `make install` / `make build`（C++ビルド）/ `make stt-deps`（Python venv構築）/ `make gpu-check` |
 | `worker-audio/` | ダウンロードした音声の一時置き場（処理後すぐ削除） |
@@ -103,7 +103,7 @@ JS版（`audio-worker.js` / `stt-local.js`）は 2026-07 に C++ へ置き換え
 | `register_account(acc)` | clientId が無ければ UUID v4 を生成 → `POST /api/client/register`。`uuid_conflict`(409) なら再生成して最大3回リトライ |
 | `ensure_registered(acc)` | 未登録なら登録フェーズを済ませてから処理へ進む（**毎ポーリングの1行目**） |
 | `mark_unregistered(email)` | サーバー側で登録が消えた（PC削除等）ときにフラグを落として再登録に回す |
-| `process_one(acc)` | 1アカウント分の1周: ensure_registered → claim → (job無ければ待機) → download → `stt::local_transcribe` → result送信。失敗時は report_error |
+| `process_one(acc)` | 1アカウント分の1周。`jobType` で文字起こし/声紋登録を分岐し、通常ジョブに `speakerProfile` があれば一時JSONを mode 0600 で作り識別に渡す |
 | `worker_loop()` | 全有効アカウントを順に process_one。仕事があったら0.5秒後、無ければ10秒後に次周 |
 
 ### ローカル管理UI（ui.hpp / ui_html.hpp）
@@ -135,7 +135,10 @@ cpp-httplib の `Server` で 127.0.0.1:39123 に立つ。認証なし（ロー�
 
 ## stt.hpp / transcribe.py
 
-- `stt::local_transcribe(filePath, quality)` が `stt/.venv/bin/python3 stt/transcribe.py <file>`
+- `stt::local_transcribe(filePath, quality, speakerProfilePath)` が `transcribe.py <file>` を起動する。
+  声紋があれば `--speaker-profile <json>` も渡し、WhisperセグメントをECAPAで照合する。
+- `stt::local_enroll_speaker(filePath)` は `--enroll-speaker` モードで正規化済み埋め込みJSONを作る。
+- 上記は `stt/.venv/bin/python3 stt/transcribe.py`
   を fork/exec で起動（`WHISPER_PYTHON` で python を上書き可）。
 - quality（`light` / `standard` / `high`）は**ジョブ所有者**のサーバー側設定（`users.stt_quality`）から
   claim レスポンスで届き、環境変数（`WHISPER_MODEL` 等）に変換して子プロセスへ渡す。

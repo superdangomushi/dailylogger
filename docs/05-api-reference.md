@@ -85,6 +85,41 @@ X-Filename: 2026-07-13_18.wav
 { "ok": true, "jobId": 42, "queued": true }
 ```
 
+### POST /api/speaker-profile — オーナー登録音声
+
+認証ヘッダーと `Content-Type: audio/wav` は `/api/audio` と同じ。スマホが録った
+12秒のWAVをボディに送る。サーバーは `speaker_enrollment` ジョブにし、
+PCクライアントが声紋を作成する。
+
+```json
+{ "ok": true, "jobId": 51, "queued": true, "status": "queued" }
+```
+
+32KB未満の短すぎる音声は400。新しい登録で、処理中でない古い登録ジョブは置き換える。
+
+### GET /api/speaker-profile — 登録状態
+
+```json
+{
+  "ok": true,
+  "registered": true,
+  "status": "ready",
+  "error": null,
+  "updatedAt": "2026-08-26 12:34:56"
+}
+```
+
+`status` は `none` / `queued` / `processing` / `ready` / `error`。再登録が失敗した場合は
+`registered=true, status=error` となり、以前の声紋は継続して使える。
+
+### DELETE /api/speaker-profile — 声紋と登録ジョブの削除
+
+暗号化保存した声紋、登録ジョブ、対応する保持WAVを削除する。
+
+```json
+{ "ok": true }
+```
+
 ### GET /api/audio/jobs — ジョブ状況
 
 `?active=1` を付けると **待機中(queued)・処理中(processing)・失敗(error) のみ**返す

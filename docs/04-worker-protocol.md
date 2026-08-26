@@ -46,7 +46,7 @@
    ├─────────────────────────────────────────→│
    │ ← WAVバイナリ                             │
    │                                          │
-   │ （faster-whisper でローカル文字起こし）      │
+   │ （Whisper文字起こし / ECAPA話者処理）          │
    │    ⑤metrics {auth, clientId,             │
    │      cpu, mem, gpu, activeJobId} (3秒毎)  │  ハートビート。途絶えたら再キュー
    ├─────────────────────────────────────────→│
@@ -138,13 +138,23 @@ UUID衝突（他アカウントが使用中、409）:
     "filename": "2026-07-13_18.wav",
     "mime": "audio/wav",
     "sizeBytes": 10485760,
-    "quality": "high"
+    "quality": "high",
+    "jobType": "transcription",
+    "speakerProfile": {
+      "version": "speechbrain-ecapa-voxceleb-v1",
+      "embedding": [0.0123, -0.0456],
+      "threshold": 0.35
+    }
   }
 }
 ```
 
 - `quality` … **ジョブ所有者**の音声認識クオリティ設定（`light`/`standard`/`high`）。
   globalモードでは処理PCの持ち主ではなくジョブ所有者の設定が使われる。
+- `jobType` … `transcription` または `speaker_enrollment`。
+- `speakerProfile` … 通常ジョブの所有者が声登録済みの場合だけ付く。上記の埋め込み配列は説明用に省略しており、実際はモデルの全次元が入る。
+
+登録ジョブでは `jobType` が `speaker_enrollment`、`speakerProfile` が `null` になる。
 
 ジョブなしレスポンス:
 
@@ -212,6 +222,24 @@ Content-Length: 10485760
   "error": "CUDA out of memory"
 }
 ```
+
+声紋登録ジョブの成功時は `text` ではなく、PCが作った正規化済み埋め込みを返す:
+
+```json
+{
+  "auth": { "email": "user@example.com", "token": "691ff8ca9ac063e6..." },
+  "clientId": "41685d34-86c5-42be-a598-e4985d8d43f4",
+  "jobId": 51,
+  "speakerProfile": {
+    "version": "speechbrain-ecapa-voxceleb-v1",
+    "embedding": [0.0123, -0.0456],
+    "threshold": 0.35
+  }
+}
+```
+
+サーバーは次元数、有限値、L2ノルム、しきい値を検査し、暗号化して保存する。
+登録WAVは保存成功後に削除される。
 
 成功レスポンス:
 

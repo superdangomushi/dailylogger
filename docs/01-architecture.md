@@ -16,16 +16,16 @@
 ┌──────────────────────┐   JSONでやり取り       │
 │ ワーカーPC (client/)  │ ←────────────────────┘
 │ audio-worker (C++)    │   claim / download / result
-│ + faster-whisper      │   （04-worker-protocol.md 参照）
+│ + Whisper + ECAPA     │   （04-worker-protocol.md 参照）
 └──────────────────────┘
 ```
 
 | 役割 | 場所 | 概要 |
 | --- | --- | --- |
 | 公開サーバー | `server/` | C++ が公開 HTTP 通信を受けて内部 Node.js へ転送する。Node.js は従来どおり、音声ジョブのキュー管理、文字起こしの保存、Gemini による課題/予定抽出、締切リマインド（LINE + アプリ通知）、Web ダッシュボードを担当 |
-| ワーカーPC | `client/` | ユーザーの手元のPC。サーバーの音声ジョブをポーリングし、faster-whisper でローカル文字起こしして結果を返す。**重い処理をサーバーから逃がすための存在** |
-| Androidアプリ | `app/` | 常時録音し、WAV をサーバーへアップロード。端末処理時は登録済みのオーナー声紋と照合して文字起こしへ話者ラベルを付ける。タスク・通知・文字起こしをサーバーから取得して表示 |
-| iOSアプリ | `ios/` | Android版のSwiftUI移植。オーナー声紋登録・端末内話者識別を含む |
+| ワーカーPC | `client/` | ユーザーの手元のPC。faster-whisper文字起こしに加え、SpeechBrain ECAPAでオーナー声紋の作成と話者識別を行う。**重い処理をスマホとサーバーから逃がす実行主体** |
+| Androidアプリ | `app/` | 常時録音、WAVアップロード、オーナー登録音声の録音・送信。声紋計算は行わない |
+| iOSアプリ | `ios/` | Android版のSwiftUI移植。登録音声の録音・送信までを担当 |
 
 ## 公開HTTPリクエストの流れ
 
@@ -43,7 +43,7 @@ Node.js の待受はループバック内に閉じ、C++ ゲートウェイが�
 2. **claim（ジョブ確保）** — ワーカーPCが 10秒ごとに `POST /api/client/claim` を呼ぶ。
    サーバーは queued のジョブを **原子的に1件だけ** `processing` に変えて渡す（複数PCが同時に来ても同じジョブは二重に渡らない）。
 3. **ダウンロード** — ワーカーが `POST /api/client/jobs/download` で音声本体を取得。
-4. **文字起こし** — ワーカーPC上で `client/stt/transcribe.py`（faster-whisper）が実行される。
+4. **文字起こし・話者識別** — ワーカーPC上で faster-whisper を実行。オーナー声紋登録済みなら、WhisperセグメントごとにECAPAで照合してラベルを付ける。
 5. **結果送信** — `POST /api/client/jobs/result` にテキストを返す。サーバーは `transcripts` テーブルへ保存（同名ファイルは追記）。
    音声ファイルはここで成功（done）して初めて削除される。**処理に失敗した場合は上限
    （`AUDIO_MAX_ATTEMPTS`、既定3回）まで即座に queued に戻して再割り振り**し、

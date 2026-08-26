@@ -13,14 +13,14 @@
 | `dashboard.js` | ~1600 | 従来どおり Node.js が配信するダッシュボードのHTML/CSS/ブラウザJavaScript |
 | `Makefile` | — | C++のビルド/テストと、Node.js・MySQLを含むセットアップ/サーバー起動 |
 | `db.js` | ~1400 | MySQL接続・スキーマ自動作成・全クエリ関数。**SQLはこのファイルにしか書かない** |
-| `audio.js` | ~180 | 音声ジョブのライフサイクル管理（enqueue / claim / 完了処理 / 再キュー） |
+| `audio.js` | ~280 | 音声ジョブのライフサイクル管理。オーナー声登録ジョブ、暗号化声紋の受け渡しも担当 |
 | `gemini.js` | ~630 | Gemini API 呼び出し（解析・要約・チャット）。ユーザーごとのAPIキーで動く |
 | `reminders.js` | — | 締切リマインドエンジン + 日次要約の生成 |
 | `summary.js` | — | 日次サマリのLINE送信（21:00の定期便） |
 | `line.js` | — | LINE Messaging API への push 送信 |
 | `moodle.js` | — | Moodle iCal(.ics) の取り込み（課題・予定→tasks） |
 | `google.js` | — | Google OAuth + Calendar v3 REST（Web連携） |
-| `cred.js` | — | 可逆暗号化（AES-256-GCM）。Wasedaパスワード・Google refresh_token・GeminiキーのDB保存用 |
+| `cred.js` | — | 可逆暗号化（AES-256-GCM）。Wasedaパスワード・Google refresh_token・Geminiキー・話者プロファイルのDB保存用 |
 | `rotate-cred-key.js` | — | 暗号鍵ローテーションスクリプト（手動実行） |
 | `send-summary.js` | — | 日次サマリを手動送信するCLIスクリプト |
 | `scraper/waseda_scraper.py` | — | MyWaseda から時間割をスクレイピング（子プロセスとして起動） |
@@ -77,6 +77,7 @@
 | 行 | エンドポイント |
 | --- | --- |
 | 1044 | `POST /api/audio` — スマホからのWAV受信→キュー化 |
+| 1060付近 | `POST/GET/DELETE /api/speaker-profile` — 登録WAVのキュー化、声紋状態、削除 |
 | 1064 | `GET /api/audio/jobs` — ジョブ一覧（`?active=1` で待機中・処理中・失敗のみ） |
 | 1078 | `POST /api/audio/jobs/:id/retry` — 失敗（error）ジョブを待機列へ戻す（attempts=0） |
 | 1097 | `GET /api/audio/workers` — PC選択画面用のワーカー一覧（メトリクス・online判定つき） |
@@ -94,7 +95,7 @@
 | 1258 | `POST /api/client/claim` — ジョブ1件確保 |
 | 1296 | `POST /api/client/metrics` — 使用率報告+ハートビート |
 | 1325 | `POST /api/client/jobs/download` — 音声本体（JSONリクエスト→バイナリ応答） |
-| 1354 | `POST /api/client/jobs/result` — 文字起こし結果/エラー |
+| 1354 | `POST /api/client/jobs/result` — 文字起こし結果 / 話者プロファイル / エラー |
 
 詳細は [04-worker-protocol.md](04-worker-protocol.md)。
 
@@ -161,6 +162,8 @@ make run     # C++ゲートウェイ + 内部Node.jsを起動
 | `failJob(jobId, error)` | 失敗の共通処理。attempts が `AUDIO_MAX_ATTEMPTS`（既定3）未満なら queued へ戻して即再割り振り、上限なら error で保留（ファイルは残す） |
 | `retryJob(email, id)` | ダッシュボードの「再試行」。error ジョブを queued に戻す（ファイル消失時は 410） |
 | `finishJobWithText(job, text)` | transcripts へ**追記**保存 → gemini_auto がONなら解析+日次要約 → ジョブdone → 音声ファイル削除（**成功時のみ削除**） |
+| `enqueueSpeakerEnrollment` / `speakerProfileStatus` | オーナー登録WAVの専用ジョブ化とアプリ向け状態取得 |
+| `completeRemoteJob` の登録分岐 | PCが返した埋め込みを検査・暗号化し、最新の登録ジョブだけを保存 |
 | `start()` | 起動時+60秒ごとに止まったジョブを再キュー（`AUDIO_WORKER_STALE_MIN` 分ハートビートが無いもの） |
 
 ## db.js の構造（セクション別）
