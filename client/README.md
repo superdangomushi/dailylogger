@@ -12,6 +12,12 @@ the polling loop, metrics reporting, and the local management UI are C++.
 Speech recognition stays in Python (`stt/transcribe.py`, faster-whisper),
 launched as a child process per job.
 
+There is also a separate, optional **local LLM analyzer** (`llm/analyzer.py`,
+Python + [Ollama](https://ollama.com)) that runs the *text* analysis locally —
+課題・予定の抽出＋要約 と 日次要約 — so users without a Gemini API key can still
+get their transcripts analyzed on their own PC. It reuses the same
+`accounts.json`. See [llm/README.md](llm/README.md) and "Local LLM analyzer" below.
+
 ## Setup
 
 ```bash
@@ -127,3 +133,29 @@ worker PCs are allowed to process audio — multiple PCs can be checked at
 once. Unchecked PCs keep polling but receive no jobs. If a stalled job is
 re-queued and picked up by another PC, a late result from the original PC is
 rejected instead of being saved twice.
+
+## Local LLM analyzer (Ollama)
+
+An optional, separate Python worker (`llm/analyzer.py`) runs the **text** analysis
+locally with Ollama, so users without a Gemini API key still get task/schedule
+extraction and daily summaries. It is independent from the C++ audio worker but
+reuses the same `accounts.json` (no extra login).
+
+```bash
+# 1) Have Ollama running with a model pulled
+ollama serve
+ollama pull qwen2.5:7b
+
+# 2) Install deps and run
+cd client
+make llm-deps
+make run-llm      # = python llm/analyzer.py
+```
+
+Unlike the audio worker, this one needs no PC/UUID registration — it authenticates
+with just the account's `email`+`token`. The server builds the prompt, and after
+Ollama returns the raw JSON the server normalizes and stores it (tasks + summary),
+so all the shared logic lives in `server/gemini.js`. Concurrent analyzers are safe:
+each unanalyzed transcript is handed out to only one via an atomic claim
+(`transcripts.analysis_claimed_at`). Full details and env vars are in
+[llm/README.md](llm/README.md).

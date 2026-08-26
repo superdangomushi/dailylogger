@@ -299,11 +299,15 @@ final class AudioCaptureService: ObservableObject {
         let frames = Int(out.frameLength)
         guard frames > 0, let ch = out.int16ChannelData else { return }
 
+        // 区間の長さを UserDefaults から読む（ロック外で）。
+        let intervalMs = Int64(accountStore.segmentIntervalMinutes) * 60_000
         segLock.lock()
         segWriter?.append(ch[0], count: frames)
-        // 実時刻の「時」が変わったら、直前1時間ぶんを確定して文字起こしへ回す。
-        let key = hourKey(Date())
-        let rotate = key != segHourKey
+        // 時刻の「時」が変わった、または設定した区間の長さが経過したら区間を確定して文字起こしへ回す。
+        let now = Date()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let key = hourKey(now)
+        let rotate = key != segHourKey || (segStartMillis > 0 && nowMs - segStartMillis >= intervalMs)
         segLock.unlock()
         if rotate { rotateSegment() }
     }

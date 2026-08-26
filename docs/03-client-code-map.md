@@ -22,9 +22,12 @@ JS版（`audio-worker.js` / `stt-local.js`）は 2026-07 に C++ へ置き換え
 | `cpp/src/stt.hpp` | `stt/transcribe.py` の子プロセス起動（fork/exec + pipe、2時間タイムアウト） |
 | `cpp/src/util.hpp` | 時刻ISO文字列・UUID v4生成・文字列処理などの小物 |
 | `cpp/third_party/` | vendor した cpp-httplib / nlohmann-json（ともにMIT、単一ヘッダ） |
-| `stt/transcribe.py` | faster-whisper文字起こし + SpeechBrain ECAPA声紋作成・照合 |
+| `stt/transcribe.py` | faster-whisper文字起こし + SpeechBrain ECAPA声紋作成・照合（Python。`stt/.venv` 内で動く） |
+| `llm/analyzer.py` | **ローカルLLM(Ollama)解析ワーカー**（Python）。音声workerとは独立。下記参照 |
+| `llm/requirements.txt` | 解析ワーカーの依存（`requests` のみ） |
+| `llm/README.md` | 解析ワーカーのセットアップ・環境変数 |
 | `accounts.json` | 設定ファイル（git管理外）。下記参照 |
-| `Makefile` | `make install` / `make build`（C++ビルド）/ `make stt-deps`（Python venv構築）/ `make gpu-check` |
+| `Makefile` | `make install` / `make build`（C++ビルド）/ `make stt-deps`（Python venv構築）/ `make gpu-check` / `make llm-deps`（解析ワーカーvenv）/ `make run-llm` |
 | `worker-audio/` | ダウンロードした音声の一時置き場（処理後すぐ削除） |
 
 ビルドは `make build`（g++ -std=c++17、要 `libssl-dev`）。生成物は `client/audio-worker`。
@@ -161,3 +164,37 @@ make run（= ./audio-worker）
          ├─ transcribe.py（faster-whisper）
          └─ POST /api/client/jobs/result
 ```
+
+## llm/analyzer.py（ローカルLLM解析ワーカー）
+
+音声workerとは**独立した Python 製の薄いツール**。Gemini APIキー未登録のユーザーでも、
+手元の [Ollama](https://ollama.com) で「課題・予定の抽出＋要約」と「日次要約」を回せるようにする。
+faster-whisper が音声をローカル処理するのと同じ発想の「テキスト解析版」。
+
+音声workerとの違い:
+
+- **PC の UUID 登録が不要**。認証は `accounts.json` の `auth`(email+token) のみ（`authFromJsonBody`）。
+- **プロンプト組み立て・正規化・DB保存はすべてサーバー側**（`server/gemini.js` の共有部品を再利用）。
+  クライアントは「サーバーから prompt を受け取り、Ollama に投げ、生の出力を返す」実行プロキシに徹する。
+- C++ ではなく Python 単体。依存は `requests` のみ（`llm/.venv` に入れる）。
+
+処理の1周（`main()` のループ。全 enabled アカウントを順に）:
+
+```
+python3 llm/analyzer.py（= make run-llm）
+ └─ 各 enabled アカウントについて:
+     ├─ process_analyze()  … 未解析が尽きるまで繰り返す
+     │    ├─ POST /api/llm/analyze/claim   → { transcriptId, prompt, schema } | null
+     │    ├─ Ollama POST /api/generate     （prompt + format=schema で構造化JSON出力）
+     │    └─ POST /api/llm/analyze/result  → { transcriptId, output }（サーバーが正規化・保存）
+     └─ process_daily()    … 今日の日次要約が必要なら1件
+          ├─ POST /api/llm/daily/claim     → { day, prompt } | null
+          ├─ Ollama POST /api/generate     （自由テキスト。schema なし）
+          └─ POST /api/llm/daily/result    → { day, output }（saveDailySummary）
+```
+
+- 排他制御: サーバーの `claimUnanalyzedTranscript`（`transcripts.analysis_claimed_at` の原子的更新、
+  `claimNextAudioJob` と同じ `LAST_INSERT_ID(id)` トリック）で、複数ワーカー・複数プロセスでも
+  同じ文字起こしを二重処理しない。処理が途中で落ちても `LLM_WORKER_STALE_MIN`（既定10分）後に再claim可能。
+- 失敗時（Ollama不調・不正JSON）は result に `error` を送り、サーバーが claim ロックを解除して次周に回す。
+- 環境変数（`OLLAMA_URL` / `OLLAMA_MODEL` / `LLM_WORKER_POLL_SEC` 等）は `llm/README.md` 参照。

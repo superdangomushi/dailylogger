@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS transcripts (
   -- このアップロード分の短い要約（Gemini）。日次要約の材料になる。
   summary     TEXT         NULL,
   analyzed_at DATETIME     NULL,
+  -- ローカルLLM(Ollama)ワーカーが未解析の文字起こしを claim したときの確保時刻。
+  -- 二重処理を防ぎつつ、途中で落ちても一定時間後に別ワーカーが再 claim できるようにする。
+  analysis_claimed_at DATETIME NULL,
   created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   -- 同じアカウントの同じファイル名は上書き（毎時ファイルの追記再送に対応）。

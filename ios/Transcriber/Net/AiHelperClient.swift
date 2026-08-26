@@ -215,6 +215,19 @@ final class AiHelperClient {
                  onOk: "保存しました")
     }
 
+    /// Gemini 解析の最小間隔（分）を取得する。0 = 毎回解析。
+    func fetchGeminiInterval(baseUrl: String, email: String, token: String) -> Result<Int, Error> {
+        getJson(baseUrl, "/api/gemini-interval", email: email, token: token)
+            .map { Int(int64($0["minutes"])) }
+    }
+
+    /// Gemini 解析の最小間隔（分）を保存する。0〜1440。
+    func saveGeminiInterval(baseUrl: String, email: String, token: String, minutes: Int) -> OpResult {
+        opResult(postJson(baseUrl, "/api/gemini-interval",
+                          body: ["email": email, "token": token, "minutes": minutes]),
+                 onOk: "保存しました")
+    }
+
     /// 音声認識クオリティ（"light"/"standard"/"high"）を取得する。
     func fetchSttQuality(baseUrl: String, email: String, token: String) -> Result<String, Error> {
         getJson(baseUrl, "/api/stt-quality", email: email, token: token)

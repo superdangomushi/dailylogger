@@ -15,6 +15,8 @@ struct RecordingTabView: View {
 
                 OwnerVoiceCard()
 
+                SegmentIntervalCard()
+
                 if !viewModel.ui.serverTranscribe {
                     ModelCard()
                 }
@@ -59,7 +61,8 @@ struct StatusCard: View {
 
             if state.active && !state.transcribing {
                 Text("録音時間: \(formatDuration(elapsedMs))")
-                Text("※ 文字起こしは1時間ごと、または終了時にまとめて実行します。")
+                let intervalLabel = segmentIntervalLabel()
+                Text("※ 文字起こしは\(intervalLabel)ごと、または終了時にまとめて実行します。")
                     .font(.caption)
             }
             // 現在どの区間を処理しているかと進捗。
@@ -92,6 +95,12 @@ struct StatusCard: View {
             ? max(0, now - state.recordingStartedElapsed)
             : 0
         return state.accumulatedRecordMs + running
+    }
+
+    private func segmentIntervalLabel() -> String {
+        let min = AccountStore().segmentIntervalMinutes
+        if min >= 60 && min % 60 == 0 { return "\(min / 60)時間" }
+        return "\(min)分"
     }
 
     private func formatDuration(_ ms: Int64) -> String {
@@ -452,5 +461,35 @@ final class OwnerVoiceEnrollmentController: ObservableObject {
     private enum EnrollmentError: LocalizedError {
         case audioFormat
         var errorDescription: String? { "16kHz音声への変換を初期化できません" }
+    }
+}
+
+/// 録音区間の長さ（何分ごとに文字起こし/アップロードするか）を設定するカード。
+/// UserDefaults に保存し、次の区間から即時反映される。
+struct SegmentIntervalCard: View {
+    private let store = AccountStore()
+    @State private var minutes: Int = 60
+
+    var body: some View {
+        CardView {
+            Text("録音区間の長さ").font(.headline)
+            Text("この分数ごとに音声を文字起こし（またはサーバーへアップロード）します。短くするとほぼリアルタイムで処理されますが処理回数が増えます。録音中でも次の区間から反映されます。")
+                .font(.caption)
+            HStack {
+                Text("区間の長さ")
+                Spacer()
+                Stepper(intervalLabel, value: $minutes, in: 1...240)
+                    .fixedSize()
+                    .onChange(of: minutes) { v in
+                        store.segmentIntervalMinutes = v
+                    }
+            }
+        }
+        .onAppear { minutes = store.segmentIntervalMinutes }
+    }
+
+    private var intervalLabel: String {
+        if minutes >= 60 && minutes % 60 == 0 { return "\(minutes / 60)時間" }
+        return "\(minutes) 分"
     }
 }

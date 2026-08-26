@@ -30,6 +30,14 @@ class AccountStore(context: Context) {
         get() = prefs.getBoolean(KEY_SERVER_TRANSCRIBE, false)
         set(value) = prefs.edit().putBoolean(KEY_SERVER_TRANSCRIBE, value).apply()
 
+    /**
+     * 録音区間の長さ（分）。この時間ごとに音声を文字起こし（またはサーバーへアップロード）する。
+     * 1〜240 の範囲で 1 分単位で調整可能。デフォルトは 60 分。
+     */
+    var segmentIntervalMinutes: Int
+        get() = prefs.getInt(KEY_SEGMENT_INTERVAL, 60).coerceIn(1, 240)
+        set(value) = prefs.edit().putInt(KEY_SEGMENT_INTERVAL, value.coerceIn(1, 240)).apply()
+
     /** ログイン成功時に呼ぶ。以後の送信で使う認証情報を確定させる。 */
     fun save(baseUrl: String, email: String, token: String) {
         prefs.edit()
@@ -54,5 +62,6 @@ class AccountStore(context: Context) {
         const val KEY_TOKEN = "token"
         const val KEY_LOGGED_IN = "logged_in"
         const val KEY_SERVER_TRANSCRIBE = "server_transcribe"
+        const val KEY_SEGMENT_INTERVAL = "segment_interval_min"
     }
 }
