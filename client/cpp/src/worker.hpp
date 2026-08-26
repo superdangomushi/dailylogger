@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <set>
 #include <string>
 #include <thread>
@@ -149,12 +150,13 @@ inline bool process_one(Account& acc) {
   const long job_id = jlong(job, "jobId");
   const std::string filename = jstr(job, "filename");
   const std::string quality = jstr(job, "quality", "high");
+  const std::string job_type = jstr(job, "jobType", "transcription");
 
   {
     std::lock_guard<std::mutex> lock(g_state_mutex);
     auto& st = status_of_locked(acc.email);
     st.state = "working";
-    st.message = filename + " を処理中";
+    st.message = filename + (job_type == "speaker_enrollment" ? " からオーナー声紋を作成中" : " を処理中");
     st.last_seen_at = util::now_iso();
     st.last_job_at = util::now_iso();
     st.last_job_id = job_id;
@@ -165,12 +167,35 @@ inline bool process_one(Account& acc) {
   const std::string file_path =
       g_work_dir + "/" + util::sanitize_name(acc.email, 200) + "-" + safe_name(job_id, filename);
   bool downloaded = false;
+  std::string profile_path;
   try {
     api::download_job_file(acc, job_id, file_path);
     downloaded = true;
-    std::string text = stt::local_transcribe(file_path, quality.empty() ? "high" : quality);
-    if (text.empty()) text = "本文なし";
-    const json result = api::post_json(acc, "/api/client/jobs/result", {{"jobId", job_id}, {"text", text}});
+    json result;
+    if (job_type == "speaker_enrollment") {
+      const std::string raw_profile = stt::local_enroll_speaker(file_path);
+      json speaker_profile;
+      try {
+        speaker_profile = json::parse(raw_profile);
+      } catch (...) {
+        throw std::runtime_error("話者プロファイル作成結果のJSONが不正です");
+      }
+      result = api::post_json(acc, "/api/client/jobs/result",
+                              {{"jobId", job_id}, {"speakerProfile", speaker_profile}});
+    } else {
+      if (job.contains("speakerProfile") && job["speakerProfile"].is_object()) {
+        profile_path = file_path + ".speaker.json";
+        std::ofstream profile_out(profile_path, std::ios::binary | std::ios::trunc);
+        if (!profile_out) throw std::runtime_error("一時話者プロファイルを書き込めません");
+        profile_out << job["speakerProfile"].dump();
+        profile_out.close();
+        ::chmod(profile_path.c_str(), S_IRUSR | S_IWUSR);
+      }
+      std::string text = stt::local_transcribe(
+          file_path, quality.empty() ? "high" : quality, profile_path);
+      if (text.empty()) text = "本文なし";
+      result = api::post_json(acc, "/api/client/jobs/result", {{"jobId", job_id}, {"text", text}});
+    }
     const std::string result_name = jstr(result, "filename");
     const long chars = jlong(result, "chars");
     {
@@ -178,12 +203,18 @@ inline bool process_one(Account& acc) {
       auto& st = status_of_locked(acc.email);
       st.completed++;
       st.state = "idle";
-      st.message = "完了: " + (result_name.empty() ? "(本文なし)" : result_name);
+      st.message = job_type == "speaker_enrollment"
+          ? "オーナー声紋の登録完了"
+          : "完了: " + (result_name.empty() ? "(本文なし)" : result_name);
       st.last_seen_at = util::now_iso();
     }
-    std::printf("[%s] ジョブ #%ld 完了: %s %s\n", acc.email.c_str(), job_id,
-                result_name.empty() ? "(本文なし)" : result_name.c_str(),
-                chars ? (std::to_string(chars) + "文字").c_str() : "");
+    if (job_type == "speaker_enrollment") {
+      std::printf("[%s] ジョブ #%ld 完了: オーナー声紋を登録しました\n", acc.email.c_str(), job_id);
+    } else {
+      std::printf("[%s] ジョブ #%ld 完了: %s %s\n", acc.email.c_str(), job_id,
+                  result_name.empty() ? "(本文なし)" : result_name.c_str(),
+                  chars ? (std::to_string(chars) + "文字").c_str() : "");
+    }
   } catch (const std::exception& e) {
     {
       std::lock_guard<std::mutex> lock(g_state_mutex);
@@ -196,6 +227,7 @@ inline bool process_one(Account& acc) {
     std::fprintf(stderr, "[%s] ジョブ #%ld 失敗: %s\n", acc.email.c_str(), job_id, e.what());
     report_error(acc, job_id, e.what());
   }
+  if (!profile_path.empty()) ::unlink(profile_path.c_str());
   if (downloaded) ::unlink(file_path.c_str());
   return true;
 }

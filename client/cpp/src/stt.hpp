@@ -49,8 +49,9 @@ inline std::map<std::string, std::string> quality_env(const std::string& quality
 // 長時間録音対策のタイムアウト（2時間）。
 constexpr int kTranscribeTimeoutSec = 2 * 3600;
 
-// transcribe.py を実行し、stdout の本文を返す。失敗時は stderr の末尾を添えて投げる。
-inline std::string local_transcribe(const std::string& file_path, const std::string& quality) {
+// transcribe.py を実行し、stdout を返す。enroll=true は声紋作成モード。
+inline std::string run_stt_script(const std::string& file_path, const std::string& quality,
+                                  const std::string& speaker_profile_path, bool enroll) {
   const std::string py = stt_python();
   if (py.empty()) {
     throw std::runtime_error("ローカル文字起こしが未設定です（`make stt-deps` を実行してください）");
@@ -73,7 +74,15 @@ inline std::string local_transcribe(const std::string& file_path, const std::str
     ::dup2(err_pipe[1], STDERR_FILENO);
     for (int fd : {out_pipe[0], out_pipe[1], err_pipe[0], err_pipe[1]}) ::close(fd);
     for (const auto& [k, v] : quality_env(quality)) ::setenv(k.c_str(), v.c_str(), 1);
-    ::execlp(py.c_str(), py.c_str(), script.c_str(), file_path.c_str(), nullptr);
+    if (enroll) {
+      ::execlp(py.c_str(), py.c_str(), script.c_str(), "--enroll-speaker", file_path.c_str(),
+               nullptr);
+    } else if (!speaker_profile_path.empty()) {
+      ::execlp(py.c_str(), py.c_str(), script.c_str(), file_path.c_str(), "--speaker-profile",
+               speaker_profile_path.c_str(), nullptr);
+    } else {
+      ::execlp(py.c_str(), py.c_str(), script.c_str(), file_path.c_str(), nullptr);
+    }
     std::fprintf(stderr, "exec failed: %s: %s\n", py.c_str(), std::strerror(errno));
     ::_exit(127);
   }
@@ -150,6 +159,15 @@ inline std::string local_transcribe(const std::string& file_path, const std::str
   }
   throw std::runtime_error("文字起こし失敗 (exit " + std::to_string(code) + ")" +
                            (tail.empty() ? "" : ": " + tail));
+}
+
+inline std::string local_transcribe(const std::string& file_path, const std::string& quality,
+                                    const std::string& speaker_profile_path = "") {
+  return run_stt_script(file_path, quality, speaker_profile_path, false);
+}
+
+inline std::string local_enroll_speaker(const std::string& file_path) {
+  return run_stt_script(file_path, "high", "", true);
 }
 
 }  // namespace stt

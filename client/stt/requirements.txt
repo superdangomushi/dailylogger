@@ -6,3 +6,8 @@ ctranslate2>=4.6.0
 # CPU マシンに入れても実行時には使われない（ディスクを ~1GB 使うだけ）。
 nvidia-cublas-cu12
 nvidia-cudnn-cu12>=9
+# オーナー/他人の話者埋め込み作成・照合（処理はPCクライアント側）。
+torch>=2.2
+torchaudio>=2.2
+speechbrain>=1.0.0
+soundfile>=0.12.1
