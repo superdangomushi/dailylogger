@@ -53,7 +53,8 @@ constexpr int kTranscribeTimeoutSec = 2 * 3600;
 inline std::string local_transcribe(const std::string& file_path, const std::string& quality) {
   const std::string py = stt_python();
   if (py.empty()) {
-    throw std::runtime_error("ローカル文字起こしが未設定です（`make stt-deps` を実行してください）");
+    throw std::runtime_error(
+        "ローカル文字起こしが未設定です（`make stt-deps` を実行してください）");
   }
 
   int out_pipe[2];
@@ -83,7 +84,8 @@ inline std::string local_transcribe(const std::string& file_path, const std::str
 
   std::string out;
   std::string err;
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(kTranscribeTimeoutSec);
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(kTranscribeTimeoutSec);
   bool timed_out = false;
 
   struct pollfd fds[2] = {{out_pipe[0], POLLIN, 0}, {err_pipe[0], POLLIN, 0}};

@@ -1,0 +1,5 @@
+# clang-format が参照する除外パターン (このファイルからの相対パス)。
+# 対応していない古い clang-format 向けに、各 Makefile 側でも
+# 整形対象のファイル一覧を明示して二重に除外している。
+client/cpp/third_party/*
+app/src/main/cpp/whisper.cpp/*

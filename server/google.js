@@ -11,13 +11,13 @@
 //   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
 //   リダイレクト URI には https://<ドメイン>/api/google/callback を登録すること。
 
-const SCOPE = "https://www.googleapis.com/auth/calendar.events";
-const AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const API = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
+const SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const API = 'https://www.googleapis.com/calendar/v3/calendars/primary/events';
 
-const clientId = () => (process.env.GOOGLE_CLIENT_ID || "").trim();
-const clientSecret = () => (process.env.GOOGLE_CLIENT_SECRET || "").trim();
+const clientId = () => (process.env.GOOGLE_CLIENT_ID || '').trim();
+const clientSecret = () => (process.env.GOOGLE_CLIENT_SECRET || '').trim();
 
 function isConfigured() {
   return Boolean(clientId() && clientSecret());
@@ -28,10 +28,10 @@ function authUrl(redirectUri, state) {
   const p = new URLSearchParams({
     client_id: clientId(),
     redirect_uri: redirectUri,
-    response_type: "code",
+    response_type: 'code',
     scope: `openid email ${SCOPE}`,
-    access_type: "offline",
-    prompt: "consent",
+    access_type: 'offline',
+    prompt: 'consent',
     state,
   });
   return `${AUTH_URL}?${p}`;
@@ -39,8 +39,8 @@ function authUrl(redirectUri, state) {
 
 async function tokenRequest(params) {
   const res = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ client_id: clientId(), client_secret: clientSecret(), ...params }),
   });
   const j = await res.json().catch(() => ({}));
@@ -52,15 +52,25 @@ async function tokenRequest(params) {
 
 /** 認可コードをトークンに交換し、どの Google アカウントかも返す。 */
 async function exchangeCode(code, redirectUri) {
-  const j = await tokenRequest({ code, redirect_uri: redirectUri, grant_type: "authorization_code" });
+  const j = await tokenRequest({
+    code,
+    redirect_uri: redirectUri,
+    grant_type: 'authorization_code',
+  });
   // id_token は Google から直接受け取ったものなので署名検証なしで payload を読んでよい。
-  const payload = JSON.parse(Buffer.from(String(j.id_token).split(".")[1], "base64url").toString("utf8"));
-  return { googleEmail: payload.email, refreshToken: j.refresh_token || "", accessToken: j.access_token };
+  const payload = JSON.parse(
+    Buffer.from(String(j.id_token).split('.')[1], 'base64url').toString('utf8'),
+  );
+  return {
+    googleEmail: payload.email,
+    refreshToken: j.refresh_token || '',
+    accessToken: j.access_token,
+  };
 }
 
 /** refresh_token から短命の access_token を発行する。 */
 async function accessTokenOf(refreshToken) {
-  const j = await tokenRequest({ refresh_token: refreshToken, grant_type: "refresh_token" });
+  const j = await tokenRequest({ refresh_token: refreshToken, grant_type: 'refresh_token' });
   return j.access_token;
 }
 
@@ -69,26 +79,28 @@ async function listUpcomingEvents(accessToken, max = 20) {
   const p = new URLSearchParams({
     timeMin: rfc3339(Date.now()),
     maxResults: String(max),
-    singleEvents: "true",
-    orderBy: "startTime",
+    singleEvents: 'true',
+    orderBy: 'startTime',
   });
   const res = await fetch(`${API}?${p}`, {
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j?.error?.message || `カレンダー取得エラー (${res.status})`);
-  return (j.items || []).map((o) => {
-    const dt = o.start?.dateTime || "";
-    const d = o.start?.date || "";
-    const endDt = o.end?.dateTime || "";
-    return {
-      title: o.summary || "(無題)",
-      whenText: dt ? dt.replace("T", " ").slice(0, 16) : d,
-      startMillis: parseMillis(dt || d),
-      // 終了日時 "yyyy-MM-dd HH:mm"。終日予定など終了時刻がないときは空。
-      endText: endDt ? endDt.replace("T", " ").slice(0, 16) : "",
-    };
-  }).sort((a, b) => a.startMillis - b.startMillis);
+  return (j.items || [])
+    .map((o) => {
+      const dt = o.start?.dateTime || '';
+      const d = o.start?.date || '';
+      const endDt = o.end?.dateTime || '';
+      return {
+        title: o.summary || '(無題)',
+        whenText: dt ? dt.replace('T', ' ').slice(0, 16) : d,
+        startMillis: parseMillis(dt || d),
+        // 終了日時 "yyyy-MM-dd HH:mm"。終日予定など終了時刻がないときは空。
+        endText: endDt ? endDt.replace('T', ' ').slice(0, 16) : '',
+      };
+    })
+    .sort((a, b) => a.startMillis - b.startMillis);
 }
 
 /**
@@ -97,7 +109,7 @@ async function listUpcomingEvents(accessToken, max = 20) {
  */
 async function insertDeadline(accessToken, title, deadline, dateOnly) {
   const at = parseMillis(deadline);
-  if (!at) throw new Error("期限が未設定のためカレンダーに登録できません");
+  if (!at) throw new Error('期限が未設定のためカレンダーに登録できません');
   const body = { summary: title };
   if (dateOnly) {
     // 終日予定の end.date は排他的（翌日）を指定する。同日だと API が 400 を返す。
@@ -117,7 +129,7 @@ async function insertDeadline(accessToken, title, deadline, dateOnly) {
  */
 async function insertEvent(accessToken, title, start, dateOnly) {
   const at = parseMillis(start);
-  if (!at) throw new Error("開始日時が未設定のためカレンダーに登録できません");
+  if (!at) throw new Error('開始日時が未設定のためカレンダーに登録できません');
   const body = { summary: title };
   if (dateOnly) {
     body.start = { date: dayString(at) };
@@ -131,11 +143,11 @@ async function insertEvent(accessToken, title, start, dateOnly) {
 
 async function postEvent(accessToken, body) {
   const res = await fetch(API, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
     },
     body: JSON.stringify(body),
   });
@@ -145,16 +157,18 @@ async function postEvent(accessToken, body) {
 
 // ---- 時刻ヘルパー（サーバーのローカルタイムゾーン基準。DB の DATETIME と同じ扱い） ----
 
-const pad = (n) => String(n).padStart(2, "0");
+const pad = (n) => String(n).padStart(2, '0');
 
 function rfc3339(ms) {
   const d = new Date(ms);
   const off = -d.getTimezoneOffset();
-  const sign = off >= 0 ? "+" : "-";
+  const sign = off >= 0 ? '+' : '-';
   const abs = Math.abs(off);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
     `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}` +
-    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+    `${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`
+  );
 }
 
 function dayString(ms) {
@@ -170,33 +184,43 @@ function parseMillis(s) {
     const t = Date.parse(str);
     return Number.isNaN(t) ? 0 : t;
   }
-  const m = str.replace("T", " ").match(/^(\d{4})-(\d{2})-(\d{2})(?:[ ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
+  const m = str
+    .replace('T', ' ')
+    .match(/^(\d{4})-(\d{2})-(\d{2})(?:[ ](\d{2}):(\d{2})(?::(\d{2}))?)?/);
   if (!m) return 0;
   return new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 0), +(m[5] || 0), +(m[6] || 0)).getTime();
 }
 
-async function insertRecurringEvent(accessToken, summary, location, startIso, endIso, recurrenceRules, privateProps) {
+async function insertRecurringEvent(
+  accessToken,
+  summary,
+  location,
+  startIso,
+  endIso,
+  recurrenceRules,
+  privateProps,
+) {
   const body = {
     summary,
     location,
     start: {
       dateTime: startIso,
-      timeZone: "Asia/Tokyo",
+      timeZone: 'Asia/Tokyo',
     },
     end: {
       dateTime: endIso,
-      timeZone: "Asia/Tokyo",
+      timeZone: 'Asia/Tokyo',
     },
     recurrence: recurrenceRules,
   };
   // 呼び出し側が付けた識別キー（再同期時の重複登録防止に使う）。
   if (privateProps) body.extendedProperties = { private: privateProps };
   const res = await fetch(API, {
-    method: "POST",
+    method: 'POST',
     headers: {
       Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
     },
     body: JSON.stringify(body),
   });
@@ -208,11 +232,11 @@ async function insertRecurringEvent(accessToken, summary, location, startIso, en
 async function findEventsByPrivateKey(accessToken, key, value) {
   const p = new URLSearchParams({
     privateExtendedProperty: `${key}=${value}`,
-    maxResults: "1",
-    showDeleted: "false",
+    maxResults: '1',
+    showDeleted: 'false',
   });
   const res = await fetch(`${API}?${p}`, {
-    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
   });
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(j?.error?.message || `カレンダー検索エラー (${res.status})`);

@@ -10,9 +10,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "config.hpp"
 #include "httplib.h"
 #include "json.hpp"
-#include "config.hpp"
 #include "util.hpp"
 
 using nlohmann::json;
@@ -77,10 +77,10 @@ inline void throw_if_redirect(const httplib::Response& res, const std::string& b
   if (!is_redirect(res.status)) return;
   std::string loc = res.get_header_value("Location");
   if (loc.empty()) loc = "(不明)";
-  throw ApiError(
-      "公開サーバーURL " + base + " はリダイレクトされています (HTTP " +
-      std::to_string(res.status) + " → " + loc +
-      ")。POSTがGETに変わって失敗するため、設定の公開サーバーURLをリダイレクト先に合わせてください");
+  throw ApiError("公開サーバーURL " + base + " はリダイレクトされています (HTTP " +
+                 std::to_string(res.status) + " → " + loc +
+                 ")。POSTがGETに変わって失敗するため、設定の公開サーバーURLをリダイレクト先に合わせ"
+                 "てください");
 }
 
 // レスポンス本文（JSONのはず）からエラーメッセージと code を取り出して投げる。
@@ -105,7 +105,8 @@ inline json auth_body(const Account& account, json extra = json::object()) {
 }
 
 // JSON API 呼び出し。成功（HTTP 2xx かつ ok:true）以外は ApiError を投げる。
-inline json post_json(const Account& account, const std::string& pathname, json body = json::object()) {
+inline json post_json(const Account& account, const std::string& pathname,
+                      json body = json::object()) {
   const std::string base = current_base_url();
   const BaseUrl b = parse_base_url(base);
   auto cli = make_client(b, 120);
@@ -196,7 +197,8 @@ inline void download_job_file(const Account& account, long job_id, const std::st
     } catch (...) {
     }
     if (message.empty()) {
-      message = !error_body.empty() ? error_body : ("音声ダウンロード失敗: HTTP " + std::to_string(status));
+      message = !error_body.empty() ? error_body
+                                    : ("音声ダウンロード失敗: HTTP " + std::to_string(status));
     }
     throw ApiError(message);
   }

@@ -118,7 +118,8 @@ inline void load_config() {
     try {
       loaded = json::parse(in);
     } catch (const std::exception& e) {
-      std::fprintf(stderr, "設定ファイルの読み込みに失敗: %s: %s\n", g_config_path.c_str(), e.what());
+      std::fprintf(stderr, "設定ファイルの読み込みに失敗: %s: %s\n", g_config_path.c_str(),
+                   e.what());
       loaded = json::object();
     }
   }
@@ -136,8 +137,10 @@ inline void load_config() {
     }
   }
 
-  const std::string env_email = util::trim(util::env_or("AIHELPER_EMAIL", util::env_or("EMAIL", "")));
-  const std::string env_token = util::trim(util::env_or("AIHELPER_TOKEN", util::env_or("TOKEN", "")));
+  const std::string env_email =
+      util::trim(util::env_or("AIHELPER_EMAIL", util::env_or("EMAIL", "")));
+  const std::string env_token =
+      util::trim(util::env_or("AIHELPER_TOKEN", util::env_or("TOKEN", "")));
   const bool exists = std::any_of(cfg.accounts.begin(), cfg.accounts.end(),
                                   [&](const Account& a) { return a.email == env_email; });
   if (!env_email.empty() && !env_token.empty() && !exists) {

@@ -1,36 +1,36 @@
-const fs = require("fs");
-const path = require("path");
-const db = require("./db");
-const line = require("./line");
+const fs = require('fs');
+const path = require('path');
+const db = require('./db');
+const line = require('./line');
 
-const ACCOUNTS_FILE = path.join(__dirname, "accounts.json");
+const ACCOUNTS_FILE = path.join(__dirname, 'accounts.json');
 
 function loadAccounts() {
   try {
-    return JSON.parse(fs.readFileSync(ACCOUNTS_FILE, "utf8"));
+    return JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf8'));
   } catch (e) {
-    console.error("accounts.json の読み込みに失敗:", e.message);
+    console.error('accounts.json の読み込みに失敗:', e.message);
     return [];
   }
 }
 
 function todayString() {
   const d = new Date();
-  const p = (n) => String(n).padStart(2, "0");
+  const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 // 1 項目を表示用の数行に整形する。
 function formatItem(index, item) {
-  const lines = [`${index}. ${item.content || "(内容なし)"}`];
+  const lines = [`${index}. ${item.content || '(内容なし)'}`];
   if (item.deadline) lines.push(`   期限: ${item.deadline}`);
   if (item.details) lines.push(`   詳細: ${item.details}`);
-  return lines.join("\n");
+  return lines.join('\n');
 }
 
 function formatSection(title, items) {
   if (!items.length) return `【${title}】\n  （なし）`;
-  const body = items.map((it, i) => formatItem(i + 1, it)).join("\n");
+  const body = items.map((it, i) => formatItem(i + 1, it)).join('\n');
   return `【${title}】\n${body}`;
 }
 
@@ -38,17 +38,17 @@ function formatSection(title, items) {
 function buildMessage(today, kadai, yotei) {
   return [
     `📋 今日のゼミまとめ (${today})`,
-    "",
-    formatSection("課題", kadai),
-    "",
-    formatSection("予定", yotei),
-  ].join("\n");
+    '',
+    formatSection('課題', kadai),
+    '',
+    formatSection('予定', yotei),
+  ].join('\n');
 }
 
 // 日次サマリを送信する。戻り値は送信件数などの集計。
 async function sendDailySummary() {
   if (!line.isConfigured()) {
-    console.warn("LINE_CHANNEL_ACCESS_TOKEN が未設定のため日次サマリ送信をスキップします");
+    console.warn('LINE_CHANNEL_ACCESS_TOKEN が未設定のため日次サマリ送信をスキップします');
     return { sent: 0, skipped: 0, failed: 0 };
   }
 
@@ -76,7 +76,7 @@ async function sendDailySummary() {
     if (ok) {
       sent++;
       console.log(
-        `日次サマリ送信: ${account.email} (課題 ${data.kadai.length} / 予定 ${data.yotei.length})`
+        `日次サマリ送信: ${account.email} (課題 ${data.kadai.length} / 予定 ${data.yotei.length})`,
       );
     } else {
       failed++;

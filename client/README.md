@@ -56,6 +56,18 @@ with:
 AUDIO_WORKER_POLL_SEC=5 ./audio-worker
 ```
 
+## Development (formatting and CI)
+
+```bash
+make format-deps   # once: install clang-format and Black into .venv-fmt
+make format        # format the C++ and Python sources
+make format-check  # verify formatting without rewriting (same check CI runs)
+```
+
+GitHub Actions runs `make build` and `make format-check` on every pull request,
+so running `make format` before committing keeps CI green.
+See [docs/09-ci-and-format.md](../docs/09-ci-and-format.md) for details.
+
 ## Environment Variables
 
 | Variable | Default | Description |

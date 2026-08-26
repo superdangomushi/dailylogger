@@ -128,6 +128,19 @@ make run
 テーブルは起動時に `CREATE TABLE IF NOT EXISTS` で自動作成（DB 自体は事前に作成が必要）。
 既存 DB に対しても不足カラムは自動で追加される。
 
+## 開発（テスト・整形・CI）
+
+```bash
+make test          # C++ゲートウェイの互換テスト (node --test)
+make format-deps   # 初回のみ。clang-format/Black を .venv-fmt に、Prettier を npm で導入
+make format        # C++ / JS / Python を整形
+make format-check  # 整形済みか検査（書き換えない・CI と同じ判定）
+```
+
+Pull Request では GitHub Actions が `make build` / `make test` / `make format-check` を
+実行する。コミット前に `make format` を通しておけば CI で落ちない。
+詳細は [docs/09-ci-and-format.md](../docs/09-ci-and-format.md)。
+
 ## アカウント登録（LINE 連携）
 
 `accounts.example.json` を `accounts.json` にコピーし、「アカウント(email)」「事前に作るトークン」、LINE 送信先の `lineUserId` を書く。

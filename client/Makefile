@@ -13,8 +13,26 @@ BIN = audio-worker
 SRCS = cpp/src/main.cpp
 HDRS = $(wildcard cpp/src/*.hpp) cpp/third_party/httplib.h cpp/third_party/json.hpp
 
+# ---- Formatters (make format / make format-check) ----
+# C++ uses clang-format, Python uses Black. cpp/third_party is vendored code,
+# so it is excluded here and in the repo-root .clang-format-ignore.
+# Versions are pinned in ../requirements-format.txt, which CI installs too.
+PYTHON ?= python3
+# Prefer the dedicated venv created by `make format-deps`, else fall back to PATH.
+ifneq ($(wildcard .venv-fmt/bin/clang-format),)
+CLANG_FORMAT ?= .venv-fmt/bin/clang-format
+BLACK ?= .venv-fmt/bin/black
+else
+CLANG_FORMAT ?= clang-format
+BLACK ?= black
+endif
+
+FMT_CPP = $(SRCS) $(wildcard cpp/src/*.hpp)
+FMT_PY = $(wildcard stt/*.py)
+
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps build stt-deps gpu-driver gpu-check run clean
+.PHONY: help install system-deps build stt-deps gpu-driver gpu-check run clean \
+	format format-check format-deps
 
 help:
 	@echo "aihelper local audio worker Makefile"
@@ -26,7 +44,10 @@ help:
 	@echo "  make stt-deps      Install faster-whisper into stt/.venv (sudo)"
 	@echo "  make gpu-driver    Install NVIDIA driver when needed (sudo; reboot required)"
 	@echo "  make gpu-check     Check whether faster-whisper can see CUDA"
-	@echo "  make clean         Remove the binary, worker-audio, and stt/.venv"
+	@echo "  make format        Format the C++ and Python sources"
+	@echo "  make format-check  Verify formatting without rewriting files (same as CI)"
+	@echo "  make format-deps   Install clang-format and Black (sudo)"
+	@echo "  make clean         Remove the binary, worker-audio, and the venvs"
 
 install: system-deps build stt-deps
 	@echo ""
@@ -73,8 +94,25 @@ gpu-check:
 	  echo "stt/.venv is not ready yet. Run 'make stt-deps' first."; \
 	fi
 
+# format-check runs the exact commands the CI format job runs, so a local
+# `make format` before pushing is enough to keep CI green.
+format:
+	$(CLANG_FORMAT) -i $(FMT_CPP)
+	$(BLACK) $(FMT_PY)
+
+format-check:
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_CPP)
+	$(BLACK) --check --diff $(FMT_PY)
+
+format-deps:
+	@echo ">> Installing clang-format and Black into .venv-fmt"
+	sudo apt-get install -y python3-venv
+	$(PYTHON) -m venv .venv-fmt
+	.venv-fmt/bin/pip install --upgrade pip
+	.venv-fmt/bin/pip install -r ../requirements-format.txt
+
 run: $(BIN)
 	./$(BIN)
 
 clean:
-	rm -rf $(BIN) worker-audio stt/.venv
+	rm -rf $(BIN) worker-audio stt/.venv .venv-fmt

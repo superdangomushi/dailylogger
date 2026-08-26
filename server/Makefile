@@ -9,6 +9,8 @@
 #   make system-deps … C++ビルド環境 + Node.js + MySQL を apt で導入し MySQL を起動 (要 sudo)
 #   make db          … データベース・専用ユーザー作成 + schema.sql 適用 (要 sudo)
 #   make npm-deps    … npm 依存関係のみインストール
+#   make format      … ソース(C++/JS/Python)を整形
+#   make format-check… 整形済みかを検査 (CI が実行するのはこれ)
 #
 # DB 認証やキーは変数/環境変数で上書き可。例:
 #   make install DB_PASSWORD=好きなパスワード
@@ -47,6 +49,25 @@ HTTP_BIN  := aihelper-server
 HTTP_SRC  := cpp/src/main.cpp
 HTTP_DEPS := ../client/cpp/third_party/httplib.h
 
+# ---- フォーマッタ (make format / make format-check) ----
+# C++ は clang-format、JS は Prettier(npm devDependency)、Python は Black。
+# 生成物や借り物のコード(node_modules / third_party)は対象に含めない。
+# バージョンは ../requirements-format.txt で固定する (CI も同じものを読む)。
+PYTHON       ?= python3
+PRETTIER     ?= ./node_modules/.bin/prettier
+# make format-deps で作った専用 venv があればそれを優先し、無ければ PATH 上の物を使う。
+ifneq ($(wildcard .venv-fmt/bin/clang-format),)
+CLANG_FORMAT ?= .venv-fmt/bin/clang-format
+BLACK        ?= .venv-fmt/bin/black
+else
+CLANG_FORMAT ?= clang-format
+BLACK        ?= black
+endif
+
+FMT_CPP := $(HTTP_SRC)
+FMT_JS  := $(wildcard *.js) $(wildcard test/*.js)
+FMT_PY  := $(wildcard scraper/*.py)
+
 # これらは Node サーバー(process.env)と mysql クライアント双方へ渡す。
 export DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD
 
@@ -61,7 +82,8 @@ MYSQL_ADMIN ?= sudo mysql --defaults-file=/etc/mysql/debian.cnf
 MYSQL_APP := mysql -h $(DB_HOST) -P $(DB_PORT) -u $(DB_USER) -p$(DB_PASSWORD)
 
 .DEFAULT_GOAL := help
-.PHONY: help install system-deps db db-user db-schema npm-deps python-deps build test run clean
+.PHONY: help install system-deps db db-user db-schema npm-deps python-deps build test run clean \
+	format format-check format-deps
 
 help: ## 使い方を表示
 	@echo "aihelper サーバー Makefile (C++ HTTP + Node.js UI/API)"
@@ -74,7 +96,10 @@ help: ## 使い方を表示
 	@echo "  make db            DB($(DB_NAME))・ユーザー($(DB_USER))作成 + schema 適用 (要 sudo)"
 	@echo "  make npm-deps      npm 依存関係のみインストール"
 	@echo "  make python-deps   時間割スクレイパの Python 依存を scraper/.venv に導入 (要 sudo)"
-	@echo "  make clean         C++ バイナリと node_modules を削除"
+	@echo "  make format        C++/JS/Python を整形"
+	@echo "  make format-check  整形済みかを検査 (書き換えない・CI と同じ)"
+	@echo "  make format-deps   clang-format / Prettier / Black を導入 (要 sudo)"
+	@echo "  make clean         C++ バイナリ・node_modules・整形用 venv を削除"
 
 # ワンショット・セットアップ。前提ターゲットは記載順に実行される。
 install: system-deps db npm-deps python-deps build ## これ1つでサーバーを動かせる状態にする
@@ -139,5 +164,26 @@ test: build ## C++ HTTP ゲートウェイの互換テストを実行
 run: build ## C++ゲートウェイ + 内部Nodeサーバーを起動
 	./$(HTTP_BIN)
 
-clean: ## C++バイナリと node_modules を削除
-	rm -rf node_modules $(HTTP_BIN)
+# 整形は CI の format-check ジョブと同じコマンドを使う。ローカルで make format を
+# 通しておけば CI で落ちない。
+format: ## C++/JS/Python を整形する (ファイルを書き換える)
+	$(CLANG_FORMAT) -i $(FMT_CPP)
+	$(PRETTIER) --write $(FMT_JS)
+	$(BLACK) $(FMT_PY)
+
+format-check: ## 整形済みかを検査する (書き換えない・CI 用)
+	$(CLANG_FORMAT) --dry-run --Werror $(FMT_CPP)
+	$(PRETTIER) --check $(FMT_JS)
+	$(BLACK) --check --diff $(FMT_PY)
+
+format-deps: ## clang-format / Black を .venv-fmt に、Prettier を npm で導入 (要 sudo)
+	@echo ">> .venv-fmt に clang-format / Black を導入します"
+	sudo apt-get install -y python3-venv
+	$(PYTHON) -m venv .venv-fmt
+	.venv-fmt/bin/pip install --upgrade pip
+	.venv-fmt/bin/pip install -r ../requirements-format.txt
+	@echo ">> Prettier (devDependency) を導入します"
+	npm ci
+
+clean: ## C++バイナリ・node_modules・整形用 venv を削除
+	rm -rf node_modules .venv-fmt $(HTTP_BIN)

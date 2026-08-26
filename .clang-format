@@ -1,0 +1,13 @@
+# C/C++ の整形設定。各 Makefile の `make format` / `make format-check` が使う。
+# 自前のコードのみが対象。third_party/ と whisper.cpp (submodule) は
+# .clang-format-ignore と各 Makefile のファイル一覧の両方で除外している。
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++17
+ColumnLimit: 100
+IndentWidth: 2
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive

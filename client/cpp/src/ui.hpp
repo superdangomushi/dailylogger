@@ -9,9 +9,9 @@
 
 #include <thread>
 
+#include "config.hpp"
 #include "httplib.h"
 #include "json.hpp"
-#include "config.hpp"
 #include "ui_html.hpp"
 #include "worker.hpp"
 
@@ -49,16 +49,17 @@ inline void reregister_all_async() {
 inline void setup_routes(httplib::Server& svr) {
   svr.set_payload_max_length(1024 * 1024);
 
-  svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
-    std::string message = "内部エラー";
-    try {
-      if (ep) std::rethrow_exception(ep);
-    } catch (const std::exception& e) {
-      message = e.what();
-    } catch (...) {
-    }
-    send_json(res, 500, {{"ok", false}, {"error", message}});
-  });
+  svr.set_exception_handler(
+      [](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
+        std::string message = "内部エラー";
+        try {
+          if (ep) std::rethrow_exception(ep);
+        } catch (const std::exception& e) {
+          message = e.what();
+        } catch (...) {
+        }
+        send_json(res, 500, {{"ok", false}, {"error", message}});
+      });
 
   svr.set_error_handler([](const httplib::Request&, httplib::Response& res) {
     if (!res.body.empty()) return;  // ハンドラが本文を用意済みなら触らない
@@ -151,7 +152,8 @@ inline void setup_routes(httplib::Server& svr) {
       update_status(snapshot.email, "idle", "クライアント登録済み");
     } catch (const std::exception& e) {
       register_error = e.what();
-      update_status(snapshot.email, "error", std::string("クライアント登録に失敗: ") + register_error);
+      update_status(snapshot.email, "error",
+                    std::string("クライアント登録に失敗: ") + register_error);
     }
     std::string client_id;
     bool registered = false;
@@ -180,7 +182,8 @@ inline void setup_routes(httplib::Server& svr) {
       return;
     }
     if (a->source == "env") {
-      send_json(res, 400, {{"ok", false}, {"error", "環境変数由来のアカウントはUIから変更できません"}});
+      send_json(res, 400,
+                {{"ok", false}, {"error", "環境変数由来のアカウントはUIから変更できません"}});
       return;
     }
     a->enabled = jbool(body, "enabled", true);
@@ -198,13 +201,13 @@ inline void setup_routes(httplib::Server& svr) {
       return;
     }
     if (a->source == "env") {
-      send_json(res, 400, {{"ok", false}, {"error", "環境変数由来のアカウントはUIから変更できません"}});
+      send_json(res, 400,
+                {{"ok", false}, {"error", "環境変数由来のアカウントはUIから変更できません"}});
       return;
     }
-    g_config.accounts.erase(
-        std::remove_if(g_config.accounts.begin(), g_config.accounts.end(),
-                       [&](const Account& x) { return x.email == email; }),
-        g_config.accounts.end());
+    g_config.accounts.erase(std::remove_if(g_config.accounts.begin(), g_config.accounts.end(),
+                                           [&](const Account& x) { return x.email == email; }),
+                            g_config.accounts.end());
     g_runtime.erase(email);
     save_config_locked();
     send_json(res, 200, {{"ok", true}});

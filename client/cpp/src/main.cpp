@@ -115,7 +115,7 @@ int main() {
   mkdir_p(worker::g_work_dir);
   load_config();
 
-  struct sigaction sa {};
+  struct sigaction sa{};
   sa.sa_handler = on_signal;
   ::sigaction(SIGINT, &sa, nullptr);
   ::sigaction(SIGTERM, &sa, nullptr);
