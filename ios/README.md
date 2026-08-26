@@ -40,7 +40,7 @@ iOS には Android のようなシステム Google アカウントが無いた�
 2. 初回はモデルをダウンロード（日本語は base 以上を推奨）
 3. 「AI」タブの AIHelper.jp 連携でサーバーURL・アカウントを入力しログイン
 4. 「録音開始」→ 文字起こしが `transcripts/` に蓄積され、定期的に自動送信される
-5. 話者を識別する場合は、録音停止中に「オーナーの声」→「声を登録」で12秒間読み上げる
+5. 話者を識別する場合はPCクライアントを起動し、録音停止中に「オーナーの声」→「声を登録」で12秒間読み上げる。声紋作成と照合はPCが行う
 6. 締切が近づくとリマインド通知（了解を押すまで残る全画面アラート＋バイブ）が届く
 7. マイクを一時的に手放したいときは「一時停止」、戻すときは「再開」
 
@@ -66,7 +66,8 @@ WAV ヘッダ付き PCM アップロード、送信済みファイルの永続�
 | --- | --- |
 | 録音/文字起こしサービス | `Transcriber/Audio/AudioCaptureService.swift` |
 | 区間PCM書き出し・読み出し | `Transcriber/Audio/PcmSegment.swift` |
-| 簡易VAD・声紋の抽出/保存/照合 | `Transcriber/Audio/AudioChunker.swift` |
+| 簡易VAD | `Transcriber/Audio/AudioChunker.swift` |
+| オーナー音声の録音・送信UI | `Transcriber/UI/RecordingTabView.swift`, `Transcriber/Net/AiHelperClient.swift` |
 | whisper エンジン / 抽象 | `Transcriber/Transcribe/WhisperEngine.swift`, `TranscriptionEngine.swift` |
 | 出力ファイル管理 | `Transcriber/Transcribe/TranscriptStore.swift` |
 | モデルDL管理 | `Transcriber/Model/ModelManager.swift` |

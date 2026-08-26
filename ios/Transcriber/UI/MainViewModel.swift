@@ -83,6 +83,11 @@ struct UiState {
     var sttQuality = "high"
     var sttQualityBusy = false
     var sttQualityMessage: String? = nil
+    // オーナー声紋（スマホは登録音声の録音/送信のみ。作成・照合はPCクライアント）。
+    var ownerVoiceRegistered = false
+    var ownerVoiceStatus = "none"
+    var ownerVoiceUploading = false
+    var ownerVoiceMessage: String? = nil
 
     var anyModelReady: Bool { !downloadedModels.isEmpty }
     var googleConnected: Bool { !googleEmails.isEmpty }
@@ -112,6 +117,7 @@ final class MainViewModel: ObservableObject {
             loadServerTranscripts()
             loadChatHistory()
             loadSttQuality()
+            loadSpeakerProfileStatus()
         }
     }
 
@@ -180,6 +186,11 @@ final class MainViewModel: ObservableObject {
                 ui.serverTranscriptsError = nil
             }
         }
+
+        let speaker = await run {
+            client.fetchSpeakerProfileStatus(baseUrl: baseUrl, email: email, token: token)
+        }
+        if case .success(let status) = speaker { applySpeakerProfileStatus(status) }
 
         await run { ReminderNotifier.poll() }
         await syncCalendarSilently()
@@ -303,6 +314,7 @@ final class MainViewModel: ObservableObject {
                 loadChatHistory()
                 loadMoodle()
                 loadSttQuality()
+                loadSpeakerProfileStatus()
                 refreshGoogle()
             case .failure(let e):
                 ui.loginInProgress = false
@@ -325,6 +337,10 @@ final class MainViewModel: ObservableObject {
         ui.summaryError = nil
         ui.sttQuality = "high"
         ui.sttQualityMessage = nil
+        ui.ownerVoiceRegistered = false
+        ui.ownerVoiceStatus = "none"
+        ui.ownerVoiceUploading = false
+        ui.ownerVoiceMessage = nil
         ui.serverTranscripts = []
         ui.serverTranscriptsLoading = false
         ui.serverTranscriptsError = nil
@@ -857,6 +873,72 @@ final class MainViewModel: ObservableObject {
                 ui.sttQuality = prev
                 ui.sttQualityMessage = message
             }
+        }
+    }
+
+    /// iPhoneで録った12秒の音声を送信。声紋作成はPCクライアントが行う。
+    func enrollOwnerVoice(_ samples: [Int16]) {
+        guard accountStore.loggedIn, !ui.ownerVoiceUploading else {
+            if !accountStore.loggedIn { ui.ownerVoiceMessage = "先にAIHelperへログインしてください" }
+            return
+        }
+        ui.ownerVoiceUploading = true
+        ui.ownerVoiceMessage = "登録音声を送信中…"
+        let (client, base, email, token) = context()
+        _Concurrency.Task {
+            let result = await run {
+                client.uploadOwnerVoice(baseUrl: base, email: email, token: token,
+                                        samples: samples, sampleRate: AudioChunker.sampleRate)
+            }
+            ui.ownerVoiceUploading = false
+            switch result {
+            case .success:
+                ui.ownerVoiceStatus = "queued"
+                ui.ownerVoiceMessage = "登録音声を送信しました。PCクライアントの声紋作成待ちです"
+            case .failure(let error):
+                ui.ownerVoiceMessage = error.localizedDescription
+            }
+        }
+    }
+
+    func deleteOwnerVoice() {
+        guard accountStore.loggedIn, !ui.ownerVoiceUploading else { return }
+        let (client, base, email, token) = context()
+        _Concurrency.Task {
+            let result = await run {
+                client.deleteSpeakerProfile(baseUrl: base, email: email, token: token)
+            }
+            switch result {
+            case .ok(let message):
+                ui.ownerVoiceRegistered = false
+                ui.ownerVoiceStatus = "none"
+                ui.ownerVoiceMessage = message
+            case .error(let message):
+                ui.ownerVoiceMessage = message
+            }
+        }
+    }
+
+    func loadSpeakerProfileStatus() {
+        guard accountStore.loggedIn else { return }
+        let (client, base, email, token) = context()
+        _Concurrency.Task {
+            let result = await run {
+                client.fetchSpeakerProfileStatus(baseUrl: base, email: email, token: token)
+            }
+            if case .success(let status) = result { applySpeakerProfileStatus(status) }
+        }
+    }
+
+    private func applySpeakerProfileStatus(_ status: AiHelperClient.SpeakerProfileStatus) {
+        ui.ownerVoiceRegistered = status.registered
+        ui.ownerVoiceStatus = status.status
+        switch status.status {
+        case "queued": ui.ownerVoiceMessage = "PCクライアントの処理待ちです"
+        case "processing": ui.ownerVoiceMessage = "PCクライアントが声紋を作成中です"
+        case "error": ui.ownerVoiceMessage = status.error ?? "声紋作成に失敗しました"
+        case "ready": ui.ownerVoiceMessage = "PCクライアントでオーナー声紋の登録が完了しました"
+        default: ui.ownerVoiceMessage = nil
         }
     }
 

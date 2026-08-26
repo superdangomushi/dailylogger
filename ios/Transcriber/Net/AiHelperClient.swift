@@ -73,6 +73,12 @@ final class AiHelperClient {
         let createdAt: String
     }
 
+    struct SpeakerProfileStatus {
+        let registered: Bool
+        let status: String
+        let error: String?
+    }
+
     struct ClientError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -332,6 +338,58 @@ final class AiHelperClient {
             return .failure(ClientError(message: serverError(data, code)))
         }
         return .success(int64(json["jobId"]))
+    }
+
+    /// 登録音声をサーバーへ送り、PCクライアントの声紋作成ジョブに積む。
+    func uploadOwnerVoice(baseUrl: String, email: String, token: String,
+                          samples: [Int16], sampleRate: Int) -> Result<Int64, Error> {
+        guard !samples.isEmpty else {
+            return .failure(ClientError(message: "登録音声がありません"))
+        }
+        guard let url = endpoint(baseUrl, "/api/speaker-profile") else {
+            return .failure(ClientError(message: "URL が不正です"))
+        }
+        var pcm = Data(capacity: samples.count * 2)
+        for sample in samples {
+            var value = sample.littleEndian
+            withUnsafeBytes(of: &value) { pcm.append(contentsOf: $0) }
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 120
+        request.setValue("audio/wav", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(email, forHTTPHeaderField: "X-Account-Email")
+        var body = wavHeader(pcmBytes: Int64(pcm.count), sampleRate: sampleRate)
+        body.append(pcm)
+        request.httpBody = body
+        let (code, data, error) = sync(request)
+        if let error { return .failure(error) }
+        guard (200...299).contains(code), let json = parse(data), json["ok"] as? Bool == true else {
+            return .failure(ClientError(message: serverError(data, code)))
+        }
+        return .success(int64(json["jobId"]))
+    }
+
+    func fetchSpeakerProfileStatus(baseUrl: String, email: String, token: String)
+        -> Result<SpeakerProfileStatus, Error> {
+        getJson(baseUrl, "/api/speaker-profile", email: email, token: token).map { json in
+            let rawError = str(json["error"])
+            return SpeakerProfileStatus(
+                registered: json["registered"] as? Bool ?? false,
+                status: str(json["status"]).isEmpty ? "none" : str(json["status"]),
+                error: rawError.isEmpty ? nil : rawError
+            )
+        }
+    }
+
+    func deleteSpeakerProfile(baseUrl: String, email: String, token: String) -> OpResult {
+        opResult(
+            requestJson(baseUrl, "/api/speaker-profile", method: "DELETE", body: nil,
+                        email: email, token: token),
+            onOk: "登録したオーナー声紋を削除しました"
+        )
     }
 
     /// PCM16/mono 用の WAV(RIFF) ヘッダ 44 バイトを組み立てる。

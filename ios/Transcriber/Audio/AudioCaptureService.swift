@@ -24,10 +24,6 @@ struct ServiceState {
     var recordingStartedElapsed: Int64 = 0
     /// 過去の稼働区間の積算録音時間(ms)。一時停止をまたいだ合計に使う。
     var accumulatedRecordMs: Int64 = 0
-    /// 直近に判定した話者（オーナー/他人/話者不明）。
-    var lastSpeaker: String? = nil
-    /// 直近音声と登録声紋の類似度。
-    var lastSpeakerSimilarity: Float? = nil
 }
 
 /// バックグラウンド録音＋ローカル文字起こしを行うサービス。
@@ -51,7 +47,6 @@ final class AudioCaptureService: ObservableObject {
     private let modelManager = ModelManager()
     private var engine: TranscriptionEngine?
     private let accountStore = AccountStore()
-    private var ownerVoiceProfile: OwnerVoiceProfile?
     private let aiHelper = AiHelperClient()
     /// 送信に失敗した音声区間の退避先（BackgroundSync が接続復帰時にまとめて再送する）。
     private let audioOutboxDir: URL
@@ -147,8 +142,6 @@ final class AudioCaptureService: ObservableObject {
             $0.error = nil
             $0.accumulatedRecordMs = 0
             $0.recordingStartedElapsed = 0
-            $0.lastSpeaker = nil
-            $0.lastSpeakerSimilarity = nil
         }
         // モデル読み込み＋ワーカー起動はバックグラウンドで
         let done = DispatchSemaphore(value: 0)
@@ -366,11 +359,9 @@ final class AudioCaptureService: ObservableObject {
         // サーバー文字起こしモード: 端末では Whisper を回さず、音声をアップロードするだけ。
         let serverMode = accountStore.serverTranscribe && accountStore.loggedIn
         if serverMode {
-            ownerVoiceProfile = nil
-            pushState { $0.modelName = "サーバー処理（音声アップロード）" }
+            pushState { $0.modelName = "PCクライアント処理（音声アップロード）" }
             backgroundSync?.triggerNow() // 前回送れなかった区間があれば同期ループで再送する
         } else {
-            ownerVoiceProfile = OwnerVoiceProfileStore().load()
             // モデル読み込み（利用者が選択したモデルを優先。未DLならDL済みの先頭）
             guard let model = modelManager.activeModel() else {
                 pushState { $0.error = "モデル未ダウンロード" }
@@ -381,10 +372,7 @@ final class AudioCaptureService: ObservableObject {
                 let e = WhisperEngine(modelPath: modelManager.modelFile(model).path)
                 try e.load()
                 engine = e
-                pushState {
-                    $0.modelName = self.ownerVoiceProfile != nil
-                        ? "\(model.displayName)・話者識別" : model.displayName
-                }
+                pushState { $0.modelName = model.displayName }
             } catch {
                 NSLog("AudioCaptureService: model load failed: %@", error.localizedDescription)
                 pushState { $0.error = "モデル読み込み失敗: \(error.localizedDescription)" }
@@ -430,7 +418,7 @@ final class AudioCaptureService: ObservableObject {
                 $0.transcribing = false
                 $0.transcribeLabel = nil
                 $0.chunksDone += 1
-                $0.lastText = "\(seg.label) をサーバーへ送信しました（サーバーで文字起こし中）"
+                $0.lastText = "\(seg.label) を送信しました（PCクライアントの処理待ち）"
             }
             backgroundSync?.triggerNow() // 通信が生きているうちに滞留分も送る
         } else {
@@ -456,17 +444,14 @@ final class AudioCaptureService: ObservableObject {
         }
     }
 
-    /// 声紋登録済みなら10秒窓で話者を判定し、同じ話者が連続する窓は1行にまとめる。
+    /// 端末モードでは話者識別を行わず、30秒窓ごとに文字起こしする。
     private func transcribeSegment(_ seg: Segment) {
-        let profile = ownerVoiceProfile
-        let windowSeconds = profile == nil ? AudioChunker.chunkSeconds : Self.speakerWindowSeconds
-        let windowSamples = AudioChunker.sampleRate * windowSeconds
+        let windowSamples = AudioChunker.sampleRate * AudioChunker.chunkSeconds
         let attrs = try? FileManager.default.attributesOfItem(atPath: seg.file.path)
         let fileBytes = (attrs?[.size] as? Int64) ?? 0
         let sampleCount = Int(fileBytes / 2)
         let totalWindows = max(1, (sampleCount + windowSamples - 1) / windowSamples)
         var sb = ""
-        var previousSpeaker: String?
         var index = 0
         pushState {
             $0.transcribing = true
@@ -477,20 +462,7 @@ final class AudioCaptureService: ObservableObject {
             if !AudioChunker.isSilent(window) {
                 let part = engine?.transcribe(window) ?? ""
                 if !part.isEmpty {
-                    if let profile {
-                        let match = profile.identify(window)
-                        let label = match.speaker.label
-                        if !sb.isEmpty && previousSpeaker != label { sb += "\n" }
-                        if previousSpeaker != label { sb += "[\(label)] " }
-                        sb += part.trimmingCharacters(in: .whitespacesAndNewlines) + " "
-                        previousSpeaker = label
-                        pushState {
-                            $0.lastSpeaker = label
-                            $0.lastSpeakerSimilarity = match.similarity
-                        }
-                    } else {
-                        sb += part + " "
-                    }
+                    sb += part + " "
                 }
             }
             index += 1
@@ -573,8 +545,6 @@ final class AudioCaptureService: ObservableObject {
     private static let minSegmentSamples: Int64 = 16_000
     // 終了時、最後の区間の文字起こし完了を待つ上限。
     private static let workerJoinSeconds: TimeInterval = 30 * 60
-    /// 声紋登録時は話者交代を拾うため、Whisper の窓を通常30秒から10秒へ短縮する。
-    private static let speakerWindowSeconds = 10
 }
 
 /// Android の LinkedBlockingQueue 相当の簡易ブロッキングキュー。
