@@ -62,6 +62,7 @@ def _pick_device():
         return forced
     try:
         import ctranslate2
+
         if ctranslate2.get_cuda_device_count() > 0:
             return "cuda"
     except Exception as e:
@@ -80,6 +81,7 @@ def _run_once(model_name, device, compute, cpu_threads, batch, decode_opts, path
     ここで全部確定させてから main 側で出力する）。
     """
     from faster_whisper import BatchedInferencePipeline, WhisperModel
+
     model = WhisperModel(model_name, device=device, compute_type=compute, cpu_threads=cpu_threads)
     opts = dict(base_opts, **decode_opts)
     try:
@@ -135,9 +137,14 @@ def main() -> int:
 
     results = info = None
     for i, (dv, mn, cp, bt, dec) in enumerate(attempts):
-        tag = f"（{i+1}/{len(attempts)}回目・空きメモリに合わせて設定を落として再試行）" if i else ""
-        print(f"モデル {mn} を読み込み中… (device={dv}, compute={cp}, batch={bt or 'off'}, "
-              f"beam={dec['beam_size']}){tag}", file=sys.stderr)
+        tag = (
+            f"（{i+1}/{len(attempts)}回目・空きメモリに合わせて設定を落として再試行）" if i else ""
+        )
+        print(
+            f"モデル {mn} を読み込み中… (device={dv}, compute={cp}, batch={bt or 'off'}, "
+            f"beam={dec['beam_size']}){tag}",
+            file=sys.stderr,
+        )
         try:
             results, info = _run_once(mn, dv, cp, cpu_threads, bt, dec, path, base_opts)
             break
@@ -146,6 +153,7 @@ def main() -> int:
                 raise
             print(f"GPU メモリ不足のため設定を落とします: {e}", file=sys.stderr)
             import gc
+
             gc.collect()
 
     if results is None:
@@ -153,8 +161,14 @@ def main() -> int:
         print("GPU では空きメモリが足りないため CPU にフォールバックします…", file=sys.stderr)
         cpu_model = os.environ.get("WHISPER_MODEL") or "large-v3-turbo"
         results, info = _run_once(
-            cpu_model, "cpu", "int8", cpu_threads, 0,
-            dict(beam_size=5, best_of=5, patience=1.0), path, base_opts,
+            cpu_model,
+            "cpu",
+            "int8",
+            cpu_threads,
+            0,
+            dict(beam_size=5, best_of=5, patience=1.0),
+            path,
+            base_opts,
         )
 
     total = getattr(info, "duration", 0) or 0
@@ -163,8 +177,10 @@ def main() -> int:
         if text:
             print(text, flush=True)
         if total:
-            print(f"進捗 {seg.end:.0f}/{total:.0f} 秒 ({min(100, seg.end / total * 100):.0f}%)",
-                  file=sys.stderr)
+            print(
+                f"進捗 {seg.end:.0f}/{total:.0f} 秒 ({min(100, seg.end / total * 100):.0f}%)",
+                file=sys.stderr,
+            )
     return 0
 
 

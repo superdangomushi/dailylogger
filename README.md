@@ -7,6 +7,10 @@
 > 📖 **詳しい説明書は [docs/](docs/README.md) にあります**
 > （コードマップ・APIリファレンス・ワーカーのJSONプロトコル・DBスキーマなど、JSON例つき）
 
+> 🛠 **コミット前に `make format`**（`server/` と `client/` の各ディレクトリで）。
+> Pull Request では GitHub Actions がビルドと整形を検査します
+> → [docs/09-ci-and-format.md](docs/09-ci-and-format.md)
+
 ---
 
 ## できること（全体像）

@@ -13,13 +13,13 @@
 // 再割り振りし、上限を超えたら error で保留する。error でもファイルは残るので、
 // ダッシュボードの「再試行」からいつでも待機列に戻せる。
 
-const fs = require("fs");
-const path = require("path");
-const db = require("./db");
-const gemini = require("./gemini");
-const reminders = require("./reminders");
+const fs = require('fs');
+const path = require('path');
+const db = require('./db');
+const gemini = require('./gemini');
+const reminders = require('./reminders');
 
-const AUDIO_DIR = path.join(__dirname, "uploads", "audio");
+const AUDIO_DIR = path.join(__dirname, 'uploads', 'audio');
 // 処理中ジョブのハートビート（クライアントが3秒ごとのメトリクスに載せる activeJobId）が
 // この分数以上途絶えたら、ワーカー停止とみなして queued に戻し別のPCへ振り直す。
 // ハートビートを送らない旧クライアントでは、10分を超える処理は途中で奪われてやり直しになる。
@@ -35,7 +35,10 @@ function ensureDir() {
 // アップロードされた音声を保存してジョブ登録し、ジョブ ID を返す。
 async function enqueue(email, filename, buffer, mime) {
   ensureDir();
-  const safe = path.basename(filename).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 200);
+  const safe = path
+    .basename(filename)
+    .replace(/[^A-Za-z0-9._-]/g, '_')
+    .slice(0, 200);
   const stored = path.join(AUDIO_DIR, `${Date.now()}-${safe}`);
   fs.writeFileSync(stored, buffer);
   const id = await db.createAudioJob(email, safe, stored, mime, buffer.length);
@@ -43,10 +46,10 @@ async function enqueue(email, filename, buffer, mime) {
 }
 
 async function finishJobWithText(job, text) {
-  const body = String(text || "").trim();
+  const body = String(text || '').trim();
   if (!body) {
     // 無音などで本文なし。エラーではなく完了扱いにする。
-    await db.finishAudioJob(job.id, { status: "done" });
+    await db.finishAudioJob(job.id, { status: 'done' });
     fs.unlink(job.stored_path, () => {});
     console.log(`音声文字起こし完了(本文なし): #${job.id}`);
     return { empty: true, transcriptId: null };
@@ -55,7 +58,7 @@ async function finishJobWithText(job, text) {
   // テキストアップロードと同じファイル名規約（yyyy-MM-dd_HH.txt）に寄せる。
   // 同じ時間帯に複数回録音停止すると同名ファイルになり得るため、
   // saveTranscript（上書き）ではなく appendTranscript（追記）で既存分を残す。
-  const txtName = job.filename.replace(/\.[^.]+$/, "") + ".txt";
+  const txtName = job.filename.replace(/\.[^.]+$/, '') + '.txt';
   const transcriptId = await db.appendTranscript(job.email, txtName, body);
 
   // 課題・予定・要約の抽出も同じパイプラインで実行（失敗しても文字起こし自体は成功扱い）。
@@ -84,7 +87,7 @@ async function finishJobWithText(job, text) {
     }
   }
 
-  await db.finishAudioJob(job.id, { status: "done", transcriptId });
+  await db.finishAudioJob(job.id, { status: 'done', transcriptId });
   if (geminiAuto) {
     try {
       const day = gemini.localDate();
@@ -113,11 +116,11 @@ async function claimRemoteJob(email, workerId, { global = false } = {}) {
   });
   if (!job) return null;
   // 音声認識クオリティはジョブ所有者の設定に従う（globalでは処理PCの持ち主と異なる）。
-  const quality = await db.getSttQuality(job.email).catch(() => "high");
+  const quality = await db.getSttQuality(job.email).catch(() => 'high');
   return {
     id: job.id,
     filename: job.filename,
-    mime: job.mime || "audio/wav",
+    mime: job.mime || 'audio/wav',
     sizeBytes: job.size_bytes || 0,
     quality,
   };
@@ -130,7 +133,7 @@ async function getClaimedJob(email, id, workerId) {
   const job = await db.getClaimedAudioJob(email, Number(id), workerId);
   if (!job) return null;
   if (!fs.existsSync(job.stored_path)) {
-    await db.finishAudioJob(job.id, { status: "error", error: "音声ファイルが見つかりません" });
+    await db.finishAudioJob(job.id, { status: 'error', error: '音声ファイルが見つかりません' });
     return null;
   }
   return job;
@@ -138,14 +141,14 @@ async function getClaimedJob(email, id, workerId) {
 
 async function completeRemoteJob(email, id, { text, error, workerId } = {}) {
   const job = await getClaimedJob(email, id, workerId);
-  if (!job) return { ok: false, status: 404, error: "処理中の音声ジョブが見つかりません" };
+  if (!job) return { ok: false, status: 404, error: '処理中の音声ジョブが見つかりません' };
   if (error) {
     const failed = await failJob(job.id, error);
-    return { ok: true, status: failed?.status || "error" };
+    return { ok: true, status: failed?.status || 'error' };
   }
   try {
-    const result = await finishJobWithText(job, text || "");
-    return { ok: true, status: "done", ...result };
+    const result = await finishJobWithText(job, text || '');
+    return { ok: true, status: 'done', ...result };
   } catch (e) {
     console.error(`外部ワーカー結果の保存に失敗: #${job.id}:`, e.message);
     await failJob(job.id, e.message);
@@ -157,12 +160,14 @@ async function completeRemoteJob(email, id, { text, error, workerId } = {}) {
 // 音声ファイルはどちらでも消さない（成功時のみ削除）。
 async function failJob(jobId, error) {
   const failed = await db.failAudioJob(jobId, String(error).slice(0, 1000), MAX_ATTEMPTS);
-  if (failed?.status === "queued") {
-    console.log(`音声ジョブ #${jobId} が失敗（${failed.attempts}回目）。再キューして別のPCへ振り直します`);
+  if (failed?.status === 'queued') {
+    console.log(
+      `音声ジョブ #${jobId} が失敗（${failed.attempts}回目）。再キューして別のPCへ振り直します`,
+    );
   } else {
     console.error(
-      `音声ジョブ #${jobId} が ${failed?.attempts ?? "?"} 回失敗したため保留にしました` +
-      "（音声は保持。ダッシュボードから再試行できます）"
+      `音声ジョブ #${jobId} が ${failed?.attempts ?? '?'} 回失敗したため保留にしました` +
+        '（音声は保持。ダッシュボードから再試行できます）',
     );
   }
   return failed;
@@ -171,12 +176,12 @@ async function failJob(jobId, error) {
 // ダッシュボードの「再試行」。error で保留されたジョブを待機列に戻す。
 async function retryJob(email, id) {
   const job = await db.getAudioJob(email, Number(id));
-  if (!job) return { ok: false, status: 404, error: "音声ジョブが見つかりません" };
-  if (job.status !== "error") {
-    return { ok: false, status: 400, error: "失敗状態のジョブだけ再試行できます" };
+  if (!job) return { ok: false, status: 404, error: '音声ジョブが見つかりません' };
+  if (job.status !== 'error') {
+    return { ok: false, status: 400, error: '失敗状態のジョブだけ再試行できます' };
   }
   if (!fs.existsSync(job.stored_path)) {
-    return { ok: false, status: 410, error: "音声ファイルが残っていないため再試行できません" };
+    return { ok: false, status: 410, error: '音声ファイルが残っていないため再試行できません' };
   }
   await db.retryAudioJob(email, job.id);
   return { ok: true };
@@ -186,14 +191,14 @@ async function retryJob(email, id) {
 // ごと削除する（もう再試行しないと決めた失敗分の後片付け用）。
 async function deleteJob(email, id) {
   const job = await db.getAudioJob(email, Number(id));
-  if (!job) return { ok: false, status: 404, error: "音声ジョブが見つかりません" };
-  if (job.status !== "error") {
-    return { ok: false, status: 400, error: "失敗状態のジョブだけ削除できます" };
+  if (!job) return { ok: false, status: 404, error: '音声ジョブが見つかりません' };
+  if (job.status !== 'error') {
+    return { ok: false, status: 400, error: '失敗状態のジョブだけ削除できます' };
   }
   // DELETE 側にも status='error' ガードがあるので、確認後に再試行などで状態が
   // 変わっていたら 0 件になる。その場合は音声ファイルを消してはいけない。
   const n = await db.deleteAudioJob(email, job.id);
-  if (!n) return { ok: false, status: 400, error: "失敗状態のジョブだけ削除できます" };
+  if (!n) return { ok: false, status: 400, error: '失敗状態のジョブだけ削除できます' };
   fs.unlink(job.stored_path, () => {});
   return { ok: true };
 }
@@ -202,15 +207,21 @@ async function deleteJob(email, id) {
 function start() {
   ensureDir();
   db.requeueStaleAudioJobs(STALE_WORKER_MIN)
-    .then((n) => { if (n > 0) console.log(`中断されていた音声ジョブ ${n} 件を再キューしました`); })
+    .then((n) => {
+      if (n > 0) console.log(`中断されていた音声ジョブ ${n} 件を再キューしました`);
+    })
     .catch(() => {});
   setInterval(
-    () => db.requeueStaleAudioJobs(STALE_WORKER_MIN)
-      .then((n) => { if (n > 0) console.log(`停止した外部音声ジョブ ${n} 件を再キューしました`); })
-      .catch(() => {}),
-    60_000
+    () =>
+      db
+        .requeueStaleAudioJobs(STALE_WORKER_MIN)
+        .then((n) => {
+          if (n > 0) console.log(`停止した外部音声ジョブ ${n} 件を再キューしました`);
+        })
+        .catch(() => {}),
+    60_000,
   );
-  console.log("音声文字起こしは client/audio-worker（外部PCのC++ワーカー）の処理待ちです");
+  console.log('音声文字起こしは client/audio-worker（外部PCのC++ワーカー）の処理待ちです');
 }
 
 module.exports = {

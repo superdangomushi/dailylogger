@@ -1,12 +1,12 @@
 // 共通ユーティリティ（時刻・文字列・UUID・環境変数）。
 #pragma once
 
-#include <chrono>
-#include <ctime>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <random>
 #include <regex>
@@ -22,9 +22,9 @@ inline std::string now_iso() {
   std::tm tm{};
   gmtime_r(&t, &tm);
   char buf[80];
-  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
-                tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
-                tm.tm_hour, tm.tm_min, tm.tm_sec, static_cast<int>(ms.count()));
+  std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ", tm.tm_year + 1900,
+                tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
+                static_cast<int>(ms.count()));
   return buf;
 }
 
@@ -55,9 +55,8 @@ inline std::string clip_utf8(const std::string& s, size_t max_bytes) {
 }
 
 inline const std::regex& uuid_re() {
-  static const std::regex re(
-      "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-      std::regex::icase);
+  static const std::regex re("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                             std::regex::icase);
   return re;
 }
 
@@ -75,9 +74,9 @@ inline std::string uuid4() {
   b[8] = static_cast<unsigned char>((b[8] & 0x3F) | 0x80);
   char out[37];
   std::snprintf(out, sizeof(out),
-                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
-                b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+                "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1],
+                b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14],
+                b[15]);
   return out;
 }
 

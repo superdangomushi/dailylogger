@@ -1,18 +1,18 @@
 // MySQL 接続まわり。接続情報は環境変数で渡す。
-const crypto = require("crypto");
-const mysql = require("mysql2/promise");
+const crypto = require('crypto');
+const mysql = require('mysql2/promise');
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
+  host: process.env.DB_HOST || 'localhost',
   port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "aihelper",
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'aihelper',
   waitForConnections: true,
   connectionLimit: 5,
-  charset: "utf8mb4",
+  charset: 'utf8mb4',
   // tasks.deadline_at などをローカル時刻文字列として扱うため、UTC 変換を無効化。
-  timezone: "local",
+  timezone: 'local',
   dateStrings: true,
 });
 
@@ -108,11 +108,11 @@ async function ensureSchema() {
   `);
 
   // 既存テーブルに後付けカラムを足す（MySQL は ADD COLUMN IF NOT EXISTS 非対応のため自前判定）。
-  await addColumnIfMissing("transcripts", "kadai_json", "LONGTEXT NULL");
-  await addColumnIfMissing("transcripts", "yotei_json", "LONGTEXT NULL");
-  await addColumnIfMissing("transcripts", "summary", "TEXT NULL");
-  await addColumnIfMissing("transcripts", "analyzed_at", "DATETIME NULL");
-  await widenColumnIfNeeded("users", "password_hash", 255, "VARCHAR(255) NOT NULL");
+  await addColumnIfMissing('transcripts', 'kadai_json', 'LONGTEXT NULL');
+  await addColumnIfMissing('transcripts', 'yotei_json', 'LONGTEXT NULL');
+  await addColumnIfMissing('transcripts', 'summary', 'TEXT NULL');
+  await addColumnIfMissing('transcripts', 'analyzed_at', 'DATETIME NULL');
+  await widenColumnIfNeeded('users', 'password_hash', 255, 'VARCHAR(255) NOT NULL');
   // 資料ファイル（PDF/TXT等）の AI 要約。
   await pool.query(`
     CREATE TABLE IF NOT EXISTS documents (
@@ -168,10 +168,10 @@ async function ensureSchema() {
 
   // ジョブを確保したワーカーPC（audio_workers.id）。再キュー後の二重処理防止と
   // 「どのPCが処理したか」の表示に使う。
-  await addColumnIfMissing("audio_jobs", "claimed_by", "INT NULL");
+  await addColumnIfMissing('audio_jobs', 'claimed_by', 'INT NULL');
   // 処理を試みた回数（claim のたびに +1）。失敗時は上限までは自動で queued に戻して
   // 再割り振りし、上限を超えたら error で保留する（音声ファイルは残るので手動再試行できる）。
-  await addColumnIfMissing("audio_jobs", "attempts", "INT NOT NULL DEFAULT 0");
+  await addColumnIfMissing('audio_jobs', 'attempts', 'INT NOT NULL DEFAULT 0');
 
   // 音声ジョブを処理するワーカーPC（クライアント）。クライアントが初回起動時に
   // UUID（client_uuid）と表示名を自分で決めてサーバーへ登録する。以後の全リクエストは
@@ -191,18 +191,22 @@ async function ensureSchema() {
     ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
   `);
   // クライアントが生成して登録するPCのID（UUID）。全体で一意（他アカウントとの衝突は登録時に拒否）。
-  await addColumnIfMissing("audio_workers", "client_uuid", "CHAR(36) NULL");
-  await addIndexIfMissing("audio_workers", "uq_workers_uuid", "UNIQUE KEY uq_workers_uuid (client_uuid)");
+  await addColumnIfMissing('audio_workers', 'client_uuid', 'CHAR(36) NULL');
+  await addIndexIfMissing(
+    'audio_workers',
+    'uq_workers_uuid',
+    'UNIQUE KEY uq_workers_uuid (client_uuid)',
+  );
 
   // ワーカーPCの公開範囲。private=クライアントでログインしたアカウントのジョブのみ、
   // global=このサービスの全ユーザーのジョブを処理できる。クライアントUIで選択し、
   // 登録（/api/client/register）と claim のJSONボディで申告される。
-  await addColumnIfMissing("audio_workers", "mode", "VARCHAR(16) NOT NULL DEFAULT 'private'");
+  await addColumnIfMissing('audio_workers', 'mode', "VARCHAR(16) NOT NULL DEFAULT 'private'");
   // クライアントが3秒ごとに送ってくるリソース使用率（PC選択画面の表示用）。
-  await addColumnIfMissing("audio_workers", "cpu_pct", "FLOAT NULL");
-  await addColumnIfMissing("audio_workers", "mem_pct", "FLOAT NULL");
-  await addColumnIfMissing("audio_workers", "gpu_pct", "FLOAT NULL");
-  await addColumnIfMissing("audio_workers", "metrics_at", "DATETIME NULL");
+  await addColumnIfMissing('audio_workers', 'cpu_pct', 'FLOAT NULL');
+  await addColumnIfMissing('audio_workers', 'mem_pct', 'FLOAT NULL');
+  await addColumnIfMissing('audio_workers', 'gpu_pct', 'FLOAT NULL');
+  await addColumnIfMissing('audio_workers', 'metrics_at', 'DATETIME NULL');
 
   // globalワーカーに対する各ユーザーの利用可否。行が無ければ「利用しない」扱い
   // （オプトイン。他ユーザー提供のPCへ音声が流れるのはユーザーが明示的に
@@ -219,17 +223,17 @@ async function ensureSchema() {
   `);
 
   // Moodle カレンダーの iCal 書き出し URL（ユーザーごと）。
-  await addColumnIfMissing("users", "moodle_ical_url", "VARCHAR(1024) NULL");
+  await addColumnIfMissing('users', 'moodle_ical_url', 'VARCHAR(1024) NULL');
   // ユーザー自身が登録する Gemini API キー（AES-256-GCM 暗号化。暗号化は呼び出し側）。
   // サーバー共通の GEMINI_API_KEY(.env) は廃止し、AI機能はこのキーで動く。
-  await addColumnIfMissing("users", "gemini_api_key_enc", "VARCHAR(1024) NULL");
+  await addColumnIfMissing('users', 'gemini_api_key_enc', 'VARCHAR(1024) NULL');
   // 音声認識クオリティ（light/standard/high）。将来プラン（課金）で制限する想定。今は自由選択。
-  await addColumnIfMissing("users", "stt_quality", "VARCHAR(16) NOT NULL DEFAULT 'high'");
+  await addColumnIfMissing('users', 'stt_quality', "VARCHAR(16) NOT NULL DEFAULT 'high'");
   // Gemini の自動解析（課題/予定抽出・要約）を文字起こし保存時に自動で走らせるか。
   // 0 のときは自動では走らず、ダッシュボードの「解析する」ボタンで手動実行する。
-  await addColumnIfMissing("users", "gemini_auto", "TINYINT(1) NOT NULL DEFAULT 1");
+  await addColumnIfMissing('users', 'gemini_auto', 'TINYINT(1) NOT NULL DEFAULT 1');
   // 紐付けた Google アカウントのメール（端末でサインインしたもの）。
-  await addColumnIfMissing("users", "google_email", "VARCHAR(255) NULL");
+  await addColumnIfMissing('users', 'google_email', 'VARCHAR(255) NULL');
   // Web(OAuth) で連携した Google アカウント（1ユーザーに複数可）。
   // refresh_token は AES-256-GCM で暗号化した文字列を保存する（暗号化は呼び出し側）。
   await pool.query(`
@@ -244,8 +248,8 @@ async function ensureSchema() {
   `);
 
   // Waseda アカウント（時間割スクレイパ用）。パスワードは AES-256-GCM で暗号化して保存。
-  await addColumnIfMissing("users", "waseda_user", "VARCHAR(255) NULL");
-  await addColumnIfMissing("users", "waseda_password_enc", "VARCHAR(1024) NULL");
+  await addColumnIfMissing('users', 'waseda_user', 'VARCHAR(255) NULL');
+  await addColumnIfMissing('users', 'waseda_password_enc', 'VARCHAR(1024) NULL');
 
   // スマホから同期されたカレンダー予定
   await pool.query(`
@@ -266,7 +270,7 @@ async function addColumnIfMissing(table, column, definition) {
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS n FROM information_schema.columns
      WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
-    [table, column]
+    [table, column],
   );
   if (rows[0].n === 0) {
     await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -277,7 +281,7 @@ async function addIndexIfMissing(table, indexName, definition) {
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS n FROM information_schema.statistics
      WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`,
-    [table, indexName]
+    [table, indexName],
   );
   if (rows[0].n === 0) {
     await pool.query(`ALTER TABLE ${table} ADD ${definition}`);
@@ -290,7 +294,7 @@ async function widenColumnIfNeeded(table, column, minLength, definition) {
      FROM information_schema.columns
      WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?
      LIMIT 1`,
-    [table, column]
+    [table, column],
   );
   const len = Number(rows[0]?.len || 0);
   if (len > 0 && len < minLength) {
@@ -313,11 +317,11 @@ async function saveTranscript(email, filename, content) {
        content = VALUES(content),
        kadai_json = NULL, yotei_json = NULL, summary = NULL, analyzed_at = NULL,
        updated_at = CURRENT_TIMESTAMP`,
-    [email, filename, content]
+    [email, filename, content],
   );
   const [rows] = await pool.query(
     `SELECT id FROM transcripts WHERE email = ? AND filename = ? LIMIT 1`,
-    [email, filename]
+    [email, filename],
   );
   return rows[0] ? rows[0].id : null;
 }
@@ -335,11 +339,11 @@ async function appendTranscript(email, filename, content) {
        content = CONCAT(content, '\n\n', VALUES(content)),
        kadai_json = NULL, yotei_json = NULL, summary = NULL, analyzed_at = NULL,
        updated_at = CURRENT_TIMESTAMP`,
-    [email, filename, content]
+    [email, filename, content],
   );
   const [rows] = await pool.query(
     `SELECT id FROM transcripts WHERE email = ? AND filename = ? LIMIT 1`,
-    [email, filename]
+    [email, filename],
   );
   return rows[0] ? rows[0].id : null;
 }
@@ -350,17 +354,17 @@ async function saveAnalysis(id, kadai, yotei, summary) {
     `UPDATE transcripts
      SET kadai_json = ?, yotei_json = ?, summary = ?, analyzed_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
-    [JSON.stringify(kadai || []), JSON.stringify(yotei || []), summary || null, id]
+    [JSON.stringify(kadai || []), JSON.stringify(yotei || []), summary || null, id],
   );
 }
 
 // 解析結果（課題 or 予定）を transcripts の生JSONから取得。kind は "kadai" | "yotei"。
 // email を条件に含め、他アカウントの解析結果を取得できないようにする。
 async function getAnalysis(email, id, kind) {
-  const column = kind === "yotei" ? "yotei_json" : "kadai_json";
+  const column = kind === 'yotei' ? 'yotei_json' : 'kadai_json';
   const [rows] = await pool.query(
     `SELECT filename, ${column} AS json FROM transcripts WHERE id = ? AND email = ? LIMIT 1`,
-    [id, email]
+    [id, email],
   );
   if (!rows[0]) return null;
   let items = [];
@@ -380,7 +384,7 @@ async function getTodaysAnalysisByEmail() {
     `SELECT email, kadai_json, yotei_json
      FROM transcripts
      WHERE analyzed_at IS NOT NULL AND DATE(updated_at) = CURDATE()
-     ORDER BY email, updated_at`
+     ORDER BY email, updated_at`,
   );
 
   const byEmail = new Map();
@@ -408,9 +412,9 @@ function parseItems(json) {
 // アカウント本人の一覧（Android アプリ・ダッシュボードの履歴画面用）。
 // contains を渡すと「本文にその文字列を含むファイル」だけに絞る（全文検索）。
 async function listTranscriptsByEmail(email, limit = 100, { contains = null } = {}) {
-  const where = ["email = ?"];
+  const where = ['email = ?'];
   const args = [email];
-  const q = String(contains || "").trim();
+  const q = String(contains || '').trim();
   if (q) {
     where.push(`content LIKE ? ESCAPE '\\\\'`);
     args.push(`%${escapeLike(q)}%`);
@@ -418,10 +422,10 @@ async function listTranscriptsByEmail(email, limit = 100, { contains = null } = 
   const [rows] = await pool.query(
     `SELECT id, filename, CHAR_LENGTH(content) AS chars, updated_at, analyzed_at
      FROM transcripts
-     WHERE ${where.join(" AND ")}
+     WHERE ${where.join(' AND ')}
      ORDER BY updated_at DESC, id DESC
      LIMIT ?`,
-    [...args, Number(limit) || 100]
+    [...args, Number(limit) || 100],
   );
   return rows;
 }
@@ -434,7 +438,7 @@ async function listUnanalyzedTranscripts(email, limit = 10) {
      WHERE email = ? AND analyzed_at IS NULL
      ORDER BY id ASC
      LIMIT ?`,
-    [email, Number(limit) || 10]
+    [email, Number(limit) || 10],
   );
   return rows;
 }
@@ -443,7 +447,7 @@ async function listUnanalyzedTranscripts(email, limit = 10) {
 async function countUnanalyzedTranscripts(email) {
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS n FROM transcripts WHERE email = ? AND analyzed_at IS NULL`,
-    [email]
+    [email],
   );
   return Number(rows[0]?.n || 0);
 }
@@ -455,7 +459,7 @@ async function getTranscriptForEmail(email, id) {
      FROM transcripts
      WHERE email = ? AND id = ?
      LIMIT 1`,
-    [email, id]
+    [email, id],
   );
   return rows[0] || null;
 }
@@ -468,7 +472,7 @@ async function getTranscriptsForDay(email, day) {
      WHERE email = ?
        AND (filename LIKE ? OR DATE(updated_at) = ?)
      ORDER BY filename ASC, id ASC`,
-    [email, `${day}\\_%`, day]
+    [email, `${day}\\_%`, day],
   );
   return rows;
 }
@@ -479,7 +483,7 @@ async function listEmailsForDailySummary(day) {
      UNION
      SELECT DISTINCT email FROM transcripts
      WHERE filename LIKE ? OR DATE(updated_at) = ?`,
-    [`${day}\\_%`, day]
+    [`${day}\\_%`, day],
   );
   return rows.map((r) => r.email);
 }
@@ -489,13 +493,13 @@ async function listEmailsForDailySummary(day) {
 async function searchTranscriptSnippets(email, keywords, { limit = 5, snippetLen = 400 } = {}) {
   const terms = (keywords || []).filter((k) => k && k.length >= 2).slice(0, 8);
   if (terms.length === 0) return [];
-  const likes = terms.map(() => `content LIKE ?`).join(" OR ");
+  const likes = terms.map(() => `content LIKE ?`).join(' OR ');
   const args = [email, ...terms.map((t) => `%${t}%`)];
   const [rows] = await pool.query(
     `SELECT filename, content FROM transcripts
      WHERE email = ? AND (${likes})
      ORDER BY updated_at DESC LIMIT ?`,
-    [...args, limit]
+    [...args, limit],
   );
   return rows.map((r) => {
     // 最初に一致した語の前後を抜粋する。
@@ -520,7 +524,7 @@ async function listTranscriptIndex(email, limit = 200) {
      WHERE email = ?
      ORDER BY filename DESC, id DESC
      LIMIT ?`,
-    [email, Number(limit) || 200]
+    [email, Number(limit) || 200],
   );
   return rows;
 }
@@ -528,14 +532,16 @@ async function listTranscriptIndex(email, limit = 200) {
 // AIチャットが時間インデックスから選んだファイルの本文を返す。
 // filenames は本人のインデックスに載っている名前のみ渡すこと（呼び出し側で検証）。
 async function getTranscriptsByFilenames(email, filenames, { maxFiles = 5 } = {}) {
-  const names = [...new Set((filenames || []).map((f) => String(f).trim()).filter(Boolean))]
-    .slice(0, maxFiles);
+  const names = [...new Set((filenames || []).map((f) => String(f).trim()).filter(Boolean))].slice(
+    0,
+    maxFiles,
+  );
   if (names.length === 0) return [];
   const [rows] = await pool.query(
     `SELECT filename, content FROM transcripts
-     WHERE email = ? AND filename IN (${names.map(() => "?").join(",")})
+     WHERE email = ? AND filename IN (${names.map(() => '?').join(',')})
      ORDER BY filename ASC`,
-    [email, ...names]
+    [email, ...names],
   );
   return rows;
 }
@@ -546,21 +552,21 @@ async function getTranscriptsByFilenames(email, filenames, { maxFiles = 5 } = {}
 
 function dedupKey(email, type, content, deadlineAt) {
   return crypto
-    .createHash("sha1")
-    .update(`${email}|${type}|${content}|${deadlineAt || ""}`)
-    .digest("hex");
+    .createHash('sha1')
+    .update(`${email}|${type}|${content}|${deadlineAt || ''}`)
+    .digest('hex');
 }
 
 function escapeLike(s) {
-  return String(s || "").replace(/[\\%_]/g, (m) => `\\${m}`);
+  return String(s || '').replace(/[\\%_]/g, (m) => `\\${m}`);
 }
 
 // 抽出した課題・予定を1件ずつ upsert する。
 // item: { type, content, details, deadline_at(null可), date_only }
 // 既存（同一 dedup_key）なら詳細などを更新しつつ、完了状態と通知済みフラグは維持する。
 async function upsertTask(email, item, sourceId) {
-  const type = item.type === "yotei" ? "yotei" : "kadai";
-  const content = String(item.content || "").slice(0, 512);
+  const type = item.type === 'yotei' ? 'yotei' : 'kadai';
+  const content = String(item.content || '').slice(0, 512);
   if (!content) return;
   const deadlineAt = item.deadline_at || null;
   const key = dedupKey(email, type, content, deadlineAt);
@@ -572,7 +578,16 @@ async function upsertTask(email, item, sourceId) {
        date_only = VALUES(date_only),
        source_id = COALESCE(tasks.source_id, VALUES(source_id)),
        updated_at = CURRENT_TIMESTAMP`,
-    [email, type, content, item.details || null, deadlineAt, item.date_only ? 1 : 0, sourceId || null, key]
+    [
+      email,
+      type,
+      content,
+      item.details || null,
+      deadlineAt,
+      item.date_only ? 1 : 0,
+      sourceId || null,
+      key,
+    ],
   );
 }
 
@@ -587,37 +602,46 @@ async function upsertTasks(email, items, sourceId) {
 async function cancelTasks(email, cancellations) {
   const canceled = [];
   for (const c of cancellations || []) {
-    const target = String(c.target || "").trim().slice(0, 512);
+    const target = String(c.target || '')
+      .trim()
+      .slice(0, 512);
     if (!target) continue;
 
-    const where = ["email = ?", "status = 'pending'", "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')"];
+    const where = [
+      'email = ?',
+      "status = 'pending'",
+      "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')",
+    ];
     const args = [email, `%${escapeLike(target)}%`, `%${escapeLike(target)}%`];
-    if (c.type === "kadai" || c.type === "yotei") {
-      where.push("type = ?");
+    if (c.type === 'kadai' || c.type === 'yotei') {
+      where.push('type = ?');
       args.push(c.type);
     }
     if (c.deadline_at) {
-      where.push("deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)");
+      where.push('deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)');
       args.push(c.deadline_at);
     }
 
     const [rows] = await pool.query(
       `SELECT id, type, content, details, deadline_at, date_only
        FROM tasks
-       WHERE ${where.join(" AND ")}
+       WHERE ${where.join(' AND ')}
        ORDER BY
          CASE WHEN content = ? THEN 0 ELSE 1 END,
          (deadline_at IS NULL),
          ABS(TIMESTAMPDIFF(MINUTE, COALESCE(deadline_at, NOW()), COALESCE(?, deadline_at, NOW()))),
          id DESC
        LIMIT 5`,
-      [...args, target, c.deadline_at || null]
+      [...args, target, c.deadline_at || null],
     );
     if (!rows.length) continue;
 
     const ids = rows.map((r) => r.id);
-    const placeholders = ids.map(() => "?").join(",");
-    await pool.query(`DELETE FROM tasks WHERE email = ? AND id IN (${placeholders})`, [email, ...ids]);
+    const placeholders = ids.map(() => '?').join(',');
+    await pool.query(`DELETE FROM tasks WHERE email = ? AND id IN (${placeholders})`, [
+      email,
+      ...ids,
+    ]);
     canceled.push(...rows);
   }
   return canceled;
@@ -628,39 +652,45 @@ async function cancelTasks(email, cancellations) {
 async function applyTaskUpdates(email, updates) {
   const updated = [];
   for (const u of updates || []) {
-    const target = String(u.target || "").trim().slice(0, 512);
+    const target = String(u.target || '')
+      .trim()
+      .slice(0, 512);
     if (!target) continue;
 
-    const where = ["email = ?", "status = 'pending'", "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')"];
+    const where = [
+      'email = ?',
+      "status = 'pending'",
+      "(content LIKE ? ESCAPE '\\\\' OR details LIKE ? ESCAPE '\\\\')",
+    ];
     const args = [email, `%${escapeLike(target)}%`, `%${escapeLike(target)}%`];
-    if (u.type === "kadai" || u.type === "yotei") {
-      where.push("type = ?");
+    if (u.type === 'kadai' || u.type === 'yotei') {
+      where.push('type = ?');
       args.push(u.type);
     }
     if (u.deadline_at) {
-      where.push("deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)");
+      where.push('deadline_at IS NOT NULL AND DATE(deadline_at) = DATE(?)');
       args.push(u.deadline_at);
     }
 
     const [rows] = await pool.query(
       `SELECT id, type, content, details, deadline_at, date_only
        FROM tasks
-       WHERE ${where.join(" AND ")}
+       WHERE ${where.join(' AND ')}
        ORDER BY
          CASE WHEN content = ? THEN 0 ELSE 1 END,
          (deadline_at IS NULL),
          ABS(TIMESTAMPDIFF(MINUTE, COALESCE(deadline_at, NOW()), COALESCE(?, deadline_at, NOW()))),
          id DESC
        LIMIT 1`,
-      [...args, target, u.deadline_at || null]
+      [...args, target, u.deadline_at || null],
     );
     const row = rows[0];
     if (!row) continue;
 
     const next = {
-      type: u.new_type === "kadai" || u.new_type === "yotei" ? u.new_type : row.type,
-      content: String(u.new_content || row.content || "").trim(),
-      details: u.new_details ? String(u.new_details).trim() : (row.details || ""),
+      type: u.new_type === 'kadai' || u.new_type === 'yotei' ? u.new_type : row.type,
+      content: String(u.new_content || row.content || '').trim(),
+      details: u.new_details ? String(u.new_details).trim() : row.details || '',
       deadline_at: u.new_deadline_at || row.deadline_at || null,
       date_only: u.new_deadline_at ? !!u.new_date_only : !!row.date_only,
     };
@@ -677,23 +707,27 @@ async function addTask(email, { type, content, details, deadline_at, date_only }
 
 // 未完了タスクのうち deadline が近い順。type 省略で全種。
 async function listUpcomingTasks(email, { includeDone = false, limit = 100 } = {}) {
-  const where = ["email = ?"];
+  const where = ['email = ?'];
   const args = [email];
   if (!includeDone) where.push("status = 'pending'");
   const [rows] = await pool.query(
     `SELECT id, type, content, details, deadline_at, date_only, status, notified_1d, notified_1h
      FROM tasks
-     WHERE ${where.join(" AND ")}
+     WHERE ${where.join(' AND ')}
      ORDER BY (deadline_at IS NULL), deadline_at ASC, id DESC
      LIMIT ?`,
-    [...args, limit]
+    [...args, limit],
   );
   return rows;
 }
 
 async function setTaskStatus(id, status, email = null) {
   const [result] = email
-    ? await pool.query(`UPDATE tasks SET status = ? WHERE id = ? AND email = ?`, [status, id, email])
+    ? await pool.query(`UPDATE tasks SET status = ? WHERE id = ? AND email = ?`, [
+        status,
+        id,
+        email,
+      ])
     : await pool.query(`UPDATE tasks SET status = ? WHERE id = ?`, [status, id]);
   return result.affectedRows > 0;
 }
@@ -701,15 +735,17 @@ async function setTaskStatus(id, status, email = null) {
 // 手動編集（Web のカレンダー画面などから）。email を条件に含め、他アカウントの
 // タスクを操作できないようにする。deadline が変わるので通知済みフラグはリセットする。
 async function updateTask(email, id, { type, content, details, deadline_at, date_only }) {
-  const t = type === "yotei" ? "yotei" : "kadai";
-  const c = String(content || "").trim().slice(0, 512);
+  const t = type === 'yotei' ? 'yotei' : 'kadai';
+  const c = String(content || '')
+    .trim()
+    .slice(0, 512);
   const key = dedupKey(email, t, c, deadline_at || null);
   const [result] = await pool.query(
     `UPDATE tasks SET
        type = ?, content = ?, details = ?, deadline_at = ?, date_only = ?,
        dedup_key = ?, notified_1d = 0, notified_1h = 0, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND email = ?`,
-    [t, c, details || null, deadline_at || null, date_only ? 1 : 0, key, id, email]
+    [t, c, details || null, deadline_at || null, date_only ? 1 : 0, key, id, email],
   );
   return result.affectedRows > 0;
 }
@@ -724,7 +760,7 @@ async function deleteTask(id, email = null) {
 // リマインド対象を探す。窓 [now, now+within分] に締切があり、まだ該当フラグが立っていない未完了タスク。
 // flagColumn は "notified_1d" | "notified_1h"。
 async function findDueTasks(flagColumn, withinMinutes) {
-  const col = flagColumn === "notified_1h" ? "notified_1h" : "notified_1d";
+  const col = flagColumn === 'notified_1h' ? 'notified_1h' : 'notified_1d';
   const [rows] = await pool.query(
     `SELECT id, email, type, content, details, deadline_at, date_only
      FROM tasks
@@ -734,13 +770,13 @@ async function findDueTasks(flagColumn, withinMinutes) {
        AND deadline_at > NOW()
        AND deadline_at <= DATE_ADD(NOW(), INTERVAL ? MINUTE)
      ORDER BY deadline_at ASC`,
-    [withinMinutes]
+    [withinMinutes],
   );
   return rows;
 }
 
 async function markNotified(id, flagColumn) {
-  const col = flagColumn === "notified_1h" ? "notified_1h" : "notified_1d";
+  const col = flagColumn === 'notified_1h' ? 'notified_1h' : 'notified_1d';
   await pool.query(`UPDATE tasks SET ${col} = 1 WHERE id = ?`, [id]);
 }
 
@@ -751,39 +787,58 @@ async function markNotified(id, flagColumn) {
 // クライアントが自分で生成した UUID と表示名でPCを登録する（再登録は名前/モードの更新）。
 // UUID はサービス全体で一意。別アカウントが既に使っている UUID は登録を拒否する
 // （なりすまし・取違防止のため。呼び出し側は 409 を返してクライアントに再生成させる）。
-async function registerAudioWorker(email, clientUuid, { name = null, mode = null, ip = null } = {}) {
-  const uuid = String(clientUuid || "").trim().toLowerCase();
-  const label = String(name || "").trim().slice(0, 255) || "PC";
-  const newMode = mode === "global" || mode === "private" ? mode : null;
+async function registerAudioWorker(
+  email,
+  clientUuid,
+  { name = null, mode = null, ip = null } = {},
+) {
+  const uuid = String(clientUuid || '')
+    .trim()
+    .toLowerCase();
+  const label =
+    String(name || '')
+      .trim()
+      .slice(0, 255) || 'PC';
+  const newMode = mode === 'global' || mode === 'private' ? mode : null;
   const [rows] = await pool.query(
     `SELECT id, email, ip, name, allowed, mode, client_uuid FROM audio_workers WHERE client_uuid = ? LIMIT 1`,
-    [uuid]
+    [uuid],
   );
   if (rows[0]) {
     if (rows[0].email !== email) return { conflict: true };
     await pool.query(
       `UPDATE audio_workers SET name = ?, mode = COALESCE(?, mode), ip = ?, last_seen_at = NOW() WHERE id = ?`,
-      [label, newMode, ip, rows[0].id]
+      [label, newMode, ip, rows[0].id],
     );
     return { ...rows[0], name: label, mode: newMode || rows[0].mode, ip };
   }
   const [r] = await pool.query(
     `INSERT INTO audio_workers (email, ip, name, mode, client_uuid) VALUES (?, ?, ?, ?, ?)`,
-    [email, ip, label, newMode || "private", uuid]
+    [email, ip, label, newMode || 'private', uuid],
   );
-  return { id: r.insertId, email, ip, name: label, allowed: 1, mode: newMode || "private", client_uuid: uuid };
+  return {
+    id: r.insertId,
+    email,
+    ip,
+    name: label,
+    allowed: 1,
+    mode: newMode || 'private',
+    client_uuid: uuid,
+  };
 }
 
 // 認証済みアカウントと UUID の両方が一致するワーカーだけを返す。
 // UUID が実在しても所有アカウントが違えば null（他人のPCを名乗れない）。
 // 見つかったら last_seen_at を進める（ダッシュボードの「接続中」表示用）。
 async function getAudioWorkerByUuid(email, clientUuid) {
-  const uuid = String(clientUuid || "").trim().toLowerCase();
+  const uuid = String(clientUuid || '')
+    .trim()
+    .toLowerCase();
   if (!uuid) return null;
   const [rows] = await pool.query(
     `SELECT id, email, ip, name, allowed, mode, client_uuid FROM audio_workers
      WHERE client_uuid = ? AND email = ? LIMIT 1`,
-    [uuid, email]
+    [uuid, email],
   );
   if (!rows[0]) return null;
   await pool.query(`UPDATE audio_workers SET last_seen_at = NOW() WHERE id = ?`, [rows[0].id]);
@@ -804,7 +859,7 @@ async function listAudioWorkers(email) {
      LEFT JOIN audio_worker_prefs p ON p.worker_id = w.id AND p.email = ?
      WHERE w.email = ? OR (w.mode = 'global' AND w.allowed = 1)
      ORDER BY (w.email = ?) DESC, w.id ASC`,
-    [email, email, email, email]
+    [email, email, email, email],
   );
   return rows;
 }
@@ -812,7 +867,7 @@ async function listAudioWorkers(email) {
 async function getAudioWorker(id) {
   const [rows] = await pool.query(
     `SELECT id, email, ip, name, allowed, mode FROM audio_workers WHERE id = ? LIMIT 1`,
-    [Number(id)]
+    [Number(id)],
   );
   return rows[0] || null;
 }
@@ -821,24 +876,24 @@ async function getAudioWorker(id) {
 async function setAudioWorkerPref(email, workerId, allowed) {
   const [rows] = await pool.query(
     `SELECT id FROM audio_workers WHERE id = ? AND mode = 'global' LIMIT 1`,
-    [Number(workerId)]
+    [Number(workerId)],
   );
   if (!rows[0]) return 0;
   await pool.query(
     `INSERT INTO audio_worker_prefs (email, worker_id, allowed) VALUES (?, ?, ?)
      ON DUPLICATE KEY UPDATE allowed = VALUES(allowed)`,
-    [email, Number(workerId), allowed ? 1 : 0]
+    [email, Number(workerId), allowed ? 1 : 0],
   );
   return 1;
 }
 
 // クライアントが claim 時に申告してきた現在のモード（global/private）を反映する。
 async function setAudioWorkerMode(id, mode) {
-  if (mode !== "global" && mode !== "private") return 0;
-  const [r] = await pool.query(
-    `UPDATE audio_workers SET mode = ? WHERE id = ?`,
-    [mode, Number(id)]
-  );
+  if (mode !== 'global' && mode !== 'private') return 0;
+  const [r] = await pool.query(`UPDATE audio_workers SET mode = ? WHERE id = ?`, [
+    mode,
+    Number(id),
+  ]);
   return r.affectedRows;
 }
 
@@ -848,7 +903,7 @@ async function updateAudioWorkerMetrics(id, { cpu = null, mem = null, gpu = null
     `UPDATE audio_workers
      SET cpu_pct = ?, mem_pct = ?, gpu_pct = ?, metrics_at = NOW(), last_seen_at = NOW()
      WHERE id = ?`,
-    [cpu, mem, gpu, Number(id)]
+    [cpu, mem, gpu, Number(id)],
   );
 }
 
@@ -856,27 +911,27 @@ async function updateAudioWorker(email, id, { allowed = null, name = null } = {}
   const sets = [];
   const args = [];
   if (allowed !== null) {
-    sets.push("allowed = ?");
+    sets.push('allowed = ?');
     args.push(allowed ? 1 : 0);
   }
   if (name !== null && String(name).trim()) {
-    sets.push("name = ?");
+    sets.push('name = ?');
     args.push(String(name).trim().slice(0, 255));
   }
   if (!sets.length) return 0;
   args.push(Number(id), email);
   const [r] = await pool.query(
-    `UPDATE audio_workers SET ${sets.join(", ")} WHERE id = ? AND email = ?`,
-    args
+    `UPDATE audio_workers SET ${sets.join(', ')} WHERE id = ? AND email = ?`,
+    args,
   );
   return r.affectedRows;
 }
 
 async function deleteAudioWorker(email, id) {
-  const [r] = await pool.query(
-    `DELETE FROM audio_workers WHERE id = ? AND email = ?`,
-    [Number(id), email]
-  );
+  const [r] = await pool.query(`DELETE FROM audio_workers WHERE id = ? AND email = ?`, [
+    Number(id),
+    email,
+  ]);
   return r.affectedRows;
 }
 
@@ -888,7 +943,7 @@ async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
   const [r] = await pool.query(
     `INSERT INTO audio_jobs (email, filename, stored_path, mime, size_bytes)
      VALUES (?, ?, ?, ?, ?)`,
-    [email, filename, storedPath, mime || null, sizeBytes || 0]
+    [email, filename, storedPath, mime || null, sizeBytes || 0],
   );
   return r.insertId;
 }
@@ -900,14 +955,18 @@ async function createAudioJob(email, filename, storedPath, mime, sizeBytes) {
 // global ワーカー（email = null）の場合は respectPrefs を立てて、所有者本人のジョブと、
 // そのPCの利用を明示的に許可したユーザー（audio_worker_prefs.allowed = 1）の
 // ジョブだけを対象にする（オプトイン。未設定ユーザーのジョブは渡さない）。
-async function claimNextAudioJob(email = null, workerId = null, { respectPrefs = false, workerOwner = null } = {}) {
+async function claimNextAudioJob(
+  email = null,
+  workerId = null,
+  { respectPrefs = false, workerOwner = null } = {},
+) {
   // LAST_INSERT_ID(expr) は接続ごとの値なので、UPDATE と SELECT を同一接続で行う。
   const conn = await pool.getConnection();
   try {
     const where = ["status = 'queued'"];
     const args = [workerId];
     if (email) {
-      where.push("email = ?");
+      where.push('email = ?');
       args.push(email);
     }
     if (respectPrefs && workerId) {
@@ -920,14 +979,14 @@ async function claimNextAudioJob(email = null, workerId = null, { respectPrefs =
     const [r] = await conn.query(
       `UPDATE audio_jobs
        SET id = LAST_INSERT_ID(id), status = 'processing', claimed_by = ?, attempts = attempts + 1
-       WHERE ${where.join(" AND ")}
+       WHERE ${where.join(' AND ')}
        ORDER BY id ASC LIMIT 1`,
-      args
+      args,
     );
     if (!r.affectedRows) return null;
     const [rows] = await conn.query(
       `SELECT id, email, filename, stored_path, mime, size_bytes, created_at
-       FROM audio_jobs WHERE id = LAST_INSERT_ID()`
+       FROM audio_jobs WHERE id = LAST_INSERT_ID()`,
     );
     return rows[0] || null;
   } finally {
@@ -949,7 +1008,7 @@ async function getClaimedAudioJob(email, id, workerId) {
      JOIN audio_workers w ON w.id = j.claimed_by
      WHERE j.id = ? AND j.status = 'processing' AND j.claimed_by = ? AND w.email = ?
      LIMIT 1`,
-    [Number(id), Number(workerId), email]
+    [Number(id), Number(workerId), email],
   );
   return rows[0] || null;
 }
@@ -962,16 +1021,18 @@ async function touchAudioJob(id, workerId) {
   const [r] = await pool.query(
     `UPDATE audio_jobs SET updated_at = NOW()
      WHERE id = ? AND status = 'processing' AND claimed_by = ?`,
-    [Number(id), Number(workerId)]
+    [Number(id), Number(workerId)],
   );
   return r.affectedRows;
 }
 
 async function finishAudioJob(id, { status, error = null, transcriptId = null }) {
-  await pool.query(
-    `UPDATE audio_jobs SET status = ?, error = ?, transcript_id = ? WHERE id = ?`,
-    [status, error, transcriptId, id]
-  );
+  await pool.query(`UPDATE audio_jobs SET status = ?, error = ?, transcript_id = ? WHERE id = ?`, [
+    status,
+    error,
+    transcriptId,
+    id,
+  ]);
 }
 
 // 処理失敗の記録。試行回数（attempts。claim ごとに +1 済み）が maxAttempts 未満なら
@@ -984,12 +1045,11 @@ async function failAudioJob(id, error, maxAttempts = 3) {
     `UPDATE audio_jobs
      SET status = IF(attempts < ?, 'queued', 'error'), claimed_by = NULL, error = ?
      WHERE id = ? AND status = 'processing'`,
-    [max, error, Number(id)]
+    [max, error, Number(id)],
   );
-  const [rows] = await pool.query(
-    `SELECT status, attempts FROM audio_jobs WHERE id = ? LIMIT 1`,
-    [Number(id)]
-  );
+  const [rows] = await pool.query(`SELECT status, attempts FROM audio_jobs WHERE id = ? LIMIT 1`, [
+    Number(id),
+  ]);
   return rows[0] || null;
 }
 
@@ -998,7 +1058,7 @@ async function getAudioJob(email, id) {
   const [rows] = await pool.query(
     `SELECT id, email, filename, stored_path, status, attempts FROM audio_jobs
      WHERE id = ? AND email = ? LIMIT 1`,
-    [Number(id), email]
+    [Number(id), email],
   );
   return rows[0] || null;
 }
@@ -1009,7 +1069,7 @@ async function retryAudioJob(email, id) {
   const [r] = await pool.query(
     `UPDATE audio_jobs SET status = 'queued', attempts = 0, claimed_by = NULL
      WHERE id = ? AND email = ? AND status = 'error'`,
-    [Number(id), email]
+    [Number(id), email],
   );
   return r.affectedRows;
 }
@@ -1019,7 +1079,7 @@ async function retryAudioJob(email, id) {
 async function deleteAudioJob(email, id) {
   const [r] = await pool.query(
     `DELETE FROM audio_jobs WHERE id = ? AND email = ? AND status = 'error'`,
-    [Number(id), email]
+    [Number(id), email],
   );
   return r.affectedRows;
 }
@@ -1027,14 +1087,14 @@ async function deleteAudioJob(email, id) {
 // activeOnly=true のときは未処理（queued）・処理中（processing）・失敗（error）だけを返す
 // （完了済みは文字起こし一覧側で見えるので、音声ジョブ一覧には出さない）。
 async function listAudioJobs(email, { limit = 30, activeOnly = false } = {}) {
-  const statusCond = activeOnly ? `AND j.status IN ('queued','processing','error')` : "";
+  const statusCond = activeOnly ? `AND j.status IN ('queued','processing','error')` : '';
   const [rows] = await pool.query(
     `SELECT j.id, j.filename, j.size_bytes, j.status, j.error, j.transcript_id, j.attempts,
             j.created_at, j.updated_at, j.claimed_by, w.name AS worker_name
      FROM audio_jobs j
      LEFT JOIN audio_workers w ON w.id = j.claimed_by
      WHERE j.email = ? ${statusCond} ORDER BY j.id DESC LIMIT ?`,
-    [email, Number(limit) || 30]
+    [email, Number(limit) || 30],
   );
   return rows;
 }
@@ -1045,15 +1105,16 @@ async function listAudioJobs(email, { limit = 30, activeOnly = false } = {}) {
 // staleMinutes 省略時は無条件（サーバー再起動時の残骸掃除用）。
 async function requeueStaleAudioJobs(staleMinutes = null) {
   const minutes = Number(staleMinutes);
-  const [r] = Number.isFinite(minutes) && minutes > 0
-    ? await pool.query(
-      `UPDATE audio_jobs SET status = 'queued', claimed_by = NULL
+  const [r] =
+    Number.isFinite(minutes) && minutes > 0
+      ? await pool.query(
+          `UPDATE audio_jobs SET status = 'queued', claimed_by = NULL
        WHERE status = 'processing' AND updated_at < DATE_SUB(NOW(), INTERVAL ? MINUTE)`,
-      [Math.floor(minutes)]
-    )
-    : await pool.query(
-      `UPDATE audio_jobs SET status = 'queued', claimed_by = NULL WHERE status = 'processing'`
-    );
+          [Math.floor(minutes)],
+        )
+      : await pool.query(
+          `UPDATE audio_jobs SET status = 'queued', claimed_by = NULL WHERE status = 'processing'`,
+        );
   return r.affectedRows;
 }
 
@@ -1066,7 +1127,7 @@ async function saveDailySummary(email, day, summary) {
     `INSERT INTO daily_summaries (email, day, summary)
      VALUES (?, ?, ?)
      ON DUPLICATE KEY UPDATE summary = VALUES(summary), generated_at = CURRENT_TIMESTAMP`,
-    [email, day, summary]
+    [email, day, summary],
   );
 }
 
@@ -1074,7 +1135,7 @@ async function getDailySummary(email, day) {
   const [rows] = await pool.query(
     `SELECT day, summary, generated_at FROM daily_summaries
      WHERE email = ? AND day = ? LIMIT 1`,
-    [email, day]
+    [email, day],
   );
   return rows[0] || null;
 }
@@ -1083,7 +1144,7 @@ async function listDailySummaries(email, limit = 30) {
   const [rows] = await pool.query(
     `SELECT day, summary, generated_at FROM daily_summaries
      WHERE email = ? ORDER BY day DESC LIMIT ?`,
-    [email, limit]
+    [email, limit],
   );
   return rows;
 }
@@ -1096,7 +1157,7 @@ async function recordNotification(email, taskId, kind, channel, message) {
   const [r] = await pool.query(
     `INSERT INTO notifications (email, task_id, kind, channel, message)
      VALUES (?, ?, ?, ?, ?)`,
-    [email, taskId || null, kind, channel || "line", message]
+    [email, taskId || null, kind, channel || 'line', message],
   );
   return r.insertId;
 }
@@ -1105,7 +1166,7 @@ async function recordNotification(email, taskId, kind, channel, message) {
 async function hasNotification(email, kind, message) {
   const [rows] = await pool.query(
     `SELECT 1 FROM notifications WHERE email = ? AND kind = ? AND message = ? LIMIT 1`,
-    [email, kind, message]
+    [email, kind, message],
   );
   return rows.length > 0;
 }
@@ -1116,17 +1177,17 @@ async function pendingNotifications(email, limit = 50) {
     `SELECT id, task_id, kind, message, created_at FROM notifications
      WHERE email = ? AND acked = 0
      ORDER BY created_at ASC LIMIT ?`,
-    [email, limit]
+    [email, limit],
   );
   return rows;
 }
 
 async function ackNotifications(email, ids) {
   if (!Array.isArray(ids) || ids.length === 0) return;
-  const placeholders = ids.map(() => "?").join(",");
+  const placeholders = ids.map(() => '?').join(',');
   await pool.query(
     `UPDATE notifications SET acked = 1 WHERE email = ? AND id IN (${placeholders})`,
-    [email, ...ids]
+    [email, ...ids],
   );
 }
 
@@ -1141,16 +1202,18 @@ async function listEmailsWithTasks() {
 // =====================================================================
 
 async function createUser(email, salt, passwordHash, token) {
-  await pool.query(
-    `INSERT INTO users (email, salt, password_hash, token) VALUES (?, ?, ?, ?)`,
-    [email, salt, passwordHash, token]
-  );
+  await pool.query(`INSERT INTO users (email, salt, password_hash, token) VALUES (?, ?, ?, ?)`, [
+    email,
+    salt,
+    passwordHash,
+    token,
+  ]);
 }
 
 async function getUserByEmail(email) {
   const [rows] = await pool.query(
     `SELECT email, salt, password_hash, token FROM users WHERE email = ? LIMIT 1`,
-    [email]
+    [email],
   );
   return rows[0] || null;
 }
@@ -1158,16 +1221,17 @@ async function getUserByEmail(email) {
 async function getUserByToken(email, token) {
   const [rows] = await pool.query(
     `SELECT email, token FROM users WHERE email = ? AND token = ? LIMIT 1`,
-    [email, token]
+    [email, token],
   );
   return rows[0] || null;
 }
 
 async function updateUserPassword(email, salt, passwordHash) {
-  await pool.query(
-    `UPDATE users SET salt = ?, password_hash = ? WHERE email = ?`,
-    [salt, passwordHash, email]
-  );
+  await pool.query(`UPDATE users SET salt = ?, password_hash = ? WHERE email = ?`, [
+    salt,
+    passwordHash,
+    email,
+  ]);
 }
 
 async function userExists(email) {
@@ -1181,41 +1245,37 @@ async function setSttQuality(email, quality) {
 }
 
 async function getSttQuality(email) {
-  const [rows] = await pool.query(
-    `SELECT stt_quality FROM users WHERE email = ? LIMIT 1`, [email]
-  );
-  return (rows[0] && rows[0].stt_quality) || "high";
+  const [rows] = await pool.query(`SELECT stt_quality FROM users WHERE email = ? LIMIT 1`, [email]);
+  return (rows[0] && rows[0].stt_quality) || 'high';
 }
 
 // Gemini 自動解析の on/off。行がない（accounts.json 由来のアカウント等）場合は既定で on。
 async function setGeminiAuto(email, enabled) {
-  const [r] = await pool.query(
-    `UPDATE users SET gemini_auto = ? WHERE email = ?`,
-    [enabled ? 1 : 0, email]
-  );
+  const [r] = await pool.query(`UPDATE users SET gemini_auto = ? WHERE email = ?`, [
+    enabled ? 1 : 0,
+    email,
+  ]);
   return r.affectedRows;
 }
 
 async function getGeminiAuto(email) {
-  const [rows] = await pool.query(
-    `SELECT gemini_auto FROM users WHERE email = ? LIMIT 1`, [email]
-  );
+  const [rows] = await pool.query(`SELECT gemini_auto FROM users WHERE email = ? LIMIT 1`, [email]);
   return rows[0] ? Boolean(rows[0].gemini_auto) : true;
 }
 
 // ユーザーごとの Gemini API キー（暗号化済み文字列を保存。暗号化/復号は呼び出し側）。
 async function setGeminiKeyEnc(email, enc) {
-  const [r] = await pool.query(
-    `UPDATE users SET gemini_api_key_enc = ? WHERE email = ?`,
-    [enc || null, email]
-  );
+  const [r] = await pool.query(`UPDATE users SET gemini_api_key_enc = ? WHERE email = ?`, [
+    enc || null,
+    email,
+  ]);
   return r.affectedRows;
 }
 
 async function getGeminiKeyEnc(email) {
-  const [rows] = await pool.query(
-    `SELECT gemini_api_key_enc FROM users WHERE email = ? LIMIT 1`, [email]
-  );
+  const [rows] = await pool.query(`SELECT gemini_api_key_enc FROM users WHERE email = ? LIMIT 1`, [
+    email,
+  ]);
   return (rows[0] && rows[0].gemini_api_key_enc) || null;
 }
 
@@ -1224,9 +1284,9 @@ async function setMoodleUrl(email, url) {
 }
 
 async function getMoodleUrl(email) {
-  const [rows] = await pool.query(
-    `SELECT moodle_ical_url FROM users WHERE email = ? LIMIT 1`, [email]
-  );
+  const [rows] = await pool.query(`SELECT moodle_ical_url FROM users WHERE email = ? LIMIT 1`, [
+    email,
+  ]);
   return rows[0] ? rows[0].moodle_ical_url : null;
 }
 
@@ -1234,14 +1294,14 @@ async function saveDocument(email, name, mime, summary) {
   await pool.query(
     `INSERT INTO documents (email, name, mime, summary) VALUES (?, ?, ?, ?)
      ON DUPLICATE KEY UPDATE mime = VALUES(mime), summary = VALUES(summary), updated_at = CURRENT_TIMESTAMP`,
-    [email, name, mime || null, summary]
+    [email, name, mime || null, summary],
   );
 }
 
 async function listDocuments(email, limit = 100) {
   const [rows] = await pool.query(
     `SELECT id, name, mime, summary, updated_at FROM documents WHERE email = ? ORDER BY updated_at DESC LIMIT ?`,
-    [email, limit]
+    [email, limit],
   );
   return rows;
 }
@@ -1253,16 +1313,21 @@ async function replaceCourses(email, courses) {
     await conn.beginTransaction();
     await conn.query(`DELETE FROM courses WHERE email = ?`, [email]);
     for (const c of courses || []) {
-      const name = String(c.name || "").trim();
+      const name = String(c.name || '').trim();
       if (!name) continue;
       await conn.query(
         `INSERT INTO courses (email, term, day, period, name, room, start_time, end_time)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          email, c.term || null, c.day || null,
+          email,
+          c.term || null,
+          c.day || null,
           c.period != null ? Number(c.period) : null,
-          name.slice(0, 255), (c.room || null), (c.start_time || null), (c.end_time || null),
-        ]
+          name.slice(0, 255),
+          c.room || null,
+          c.start_time || null,
+          c.end_time || null,
+        ],
       );
     }
     await conn.commit();
@@ -1279,7 +1344,7 @@ async function listCourses(email) {
     `SELECT id, term, day, period, name, room, start_time, end_time
      FROM courses WHERE email = ?
      ORDER BY FIELD(day,'月','火','水','木','金','土','日'), period`,
-    [email]
+    [email],
   );
   return rows;
 }
@@ -1292,10 +1357,18 @@ async function updateCourse(email, id, { term, day, period, name, room, start_ti
        term = ?, day = ?, period = ?, name = ?, room = ?, start_time = ?, end_time = ?
      WHERE id = ? AND email = ?`,
     [
-      term || null, day || null, period != null && period !== "" ? Number(period) : null,
-      String(name || "").trim().slice(0, 255), room || null, start_time || null, end_time || null,
-      id, email,
-    ]
+      term || null,
+      day || null,
+      period != null && period !== '' ? Number(period) : null,
+      String(name || '')
+        .trim()
+        .slice(0, 255),
+      room || null,
+      start_time || null,
+      end_time || null,
+      id,
+      email,
+    ],
   );
   return result.affectedRows > 0;
 }
@@ -1307,22 +1380,26 @@ async function deleteCourse(email, id) {
 
 // Waseda アカウント情報の保存・取得。password は暗号化済み文字列を渡す（暗号化は呼び出し側）。
 async function setWasedaCreds(email, wasedaUser, passwordEnc) {
-  await pool.query(
-    `UPDATE users SET waseda_user = ?, waseda_password_enc = ? WHERE email = ?`,
-    [wasedaUser || null, passwordEnc || null, email]
-  );
+  await pool.query(`UPDATE users SET waseda_user = ?, waseda_password_enc = ? WHERE email = ?`, [
+    wasedaUser || null,
+    passwordEnc || null,
+    email,
+  ]);
 }
 
 async function getWasedaCreds(email) {
   const [rows] = await pool.query(
     `SELECT waseda_user, waseda_password_enc FROM users WHERE email = ? LIMIT 1`,
-    [email]
+    [email],
   );
   return rows[0] || null;
 }
 
 async function setGoogleEmail(email, googleEmail) {
-  await pool.query(`UPDATE users SET google_email = ? WHERE email = ?`, [googleEmail || null, email]);
+  await pool.query(`UPDATE users SET google_email = ? WHERE email = ?`, [
+    googleEmail || null,
+    email,
+  ]);
 }
 
 // ---- Web(OAuth) で連携した Google アカウント（複数可） ----
@@ -1331,41 +1408,41 @@ async function upsertGoogleAccount(email, googleEmail, refreshTokenEnc) {
   await pool.query(
     `INSERT INTO google_accounts (email, google_email, refresh_token) VALUES (?, ?, ?)
      ON DUPLICATE KEY UPDATE refresh_token = VALUES(refresh_token)`,
-    [email, googleEmail, refreshTokenEnc]
+    [email, googleEmail, refreshTokenEnc],
   );
 }
 
 async function listGoogleAccounts(email) {
   const [rows] = await pool.query(
     `SELECT google_email, refresh_token FROM google_accounts WHERE email = ? ORDER BY id`,
-    [email]
+    [email],
   );
   return rows;
 }
 
 async function removeGoogleAccount(email, googleEmail) {
-  await pool.query(
-    `DELETE FROM google_accounts WHERE email = ? AND google_email = ?`,
-    [email, googleEmail]
-  );
+  await pool.query(`DELETE FROM google_accounts WHERE email = ? AND google_email = ?`, [
+    email,
+    googleEmail,
+  ]);
 }
 
 async function replaceCalendarEvents(email, events) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    await connection.query("DELETE FROM calendar_events WHERE email = ?", [email]);
+    await connection.query('DELETE FROM calendar_events WHERE email = ?', [email]);
     if (events && events.length) {
-      const values = events.map(e => [
+      const values = events.map((e) => [
         email,
-        e.title || "",
-        e.whenText || e.start_at || "",
+        e.title || '',
+        e.whenText || e.start_at || '',
         e.startMillis || 0,
-        e.location || null
+        e.location || null,
       ]);
       await connection.query(
-        "INSERT INTO calendar_events (email, title, start_at, start_millis, location) VALUES ?",
-        [values]
+        'INSERT INTO calendar_events (email, title, start_at, start_millis, location) VALUES ?',
+        [values],
       );
     }
     await connection.commit();
@@ -1379,8 +1456,8 @@ async function replaceCalendarEvents(email, events) {
 
 async function listCalendarEvents(email) {
   const [rows] = await pool.query(
-    "SELECT title, start_at as whenText, start_millis as startMillis, location FROM calendar_events WHERE email = ? ORDER BY start_millis ASC",
-    [email]
+    'SELECT title, start_at as whenText, start_millis as startMillis, location FROM calendar_events WHERE email = ? ORDER BY start_millis ASC',
+    [email],
   );
   return rows;
 }
@@ -1390,10 +1467,11 @@ async function listCalendarEvents(email) {
 // =====================================================================
 
 async function addChatMessage(email, role, content) {
-  await pool.query(
-    `INSERT INTO chat_messages (email, role, content) VALUES (?, ?, ?)`,
-    [email, role, String(content || "").slice(0, 8000)]
-  );
+  await pool.query(`INSERT INTO chat_messages (email, role, content) VALUES (?, ?, ?)`, [
+    email,
+    role,
+    String(content || '').slice(0, 8000),
+  ]);
 }
 
 // 直近 limit 件を古い順で返す（プロンプトへの注入・画面表示の両方に使う）。
@@ -1401,7 +1479,7 @@ async function listRecentChatMessages(email, limit = 30) {
   const [rows] = await pool.query(
     `SELECT role, content, created_at FROM chat_messages
      WHERE email = ? ORDER BY id DESC LIMIT ?`,
-    [email, limit]
+    [email, limit],
   );
   return rows.reverse();
 }
@@ -1409,7 +1487,7 @@ async function listRecentChatMessages(email, limit = 30) {
 // Moodle URL を登録済みのユーザー一覧（定期同期用）。
 async function listUsersWithMoodle() {
   const [rows] = await pool.query(
-    `SELECT email, moodle_ical_url FROM users WHERE moodle_ical_url IS NOT NULL AND moodle_ical_url <> ''`
+    `SELECT email, moodle_ical_url FROM users WHERE moodle_ical_url IS NOT NULL AND moodle_ical_url <> ''`,
   );
   return rows;
 }

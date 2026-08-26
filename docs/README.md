@@ -18,6 +18,7 @@
 | [06-database.md](06-database.md) | MySQLの全テーブルスキーマとカラムの意味 |
 | [07-gemini-pipeline.md](07-gemini-pipeline.md) | Gemini解析パイプライン（自動/手動解析、gemini_auto設定、日次要約、AIチャット） |
 | [08-dashboard.md](08-dashboard.md) | ダッシュボード（Web UI）の画面ごとの機能と対応するコードの場所 |
+| [09-ci-and-format.md](09-ci-and-format.md) | GitHub Actions のビルド検証CIと、C++/JS/Python のフォーマッタ（`make format`） |
 
 ## まず読むなら
 
@@ -25,6 +26,7 @@
 - ワーカーPCとサーバーのやりとりを知りたい → [04-worker-protocol.md](04-worker-protocol.md)
 - 「この機能のコードはどこ？」→ [02-server-code-map.md](02-server-code-map.md) / [03-client-code-map.md](03-client-code-map.md)
 - APIを叩きたい → [05-api-reference.md](05-api-reference.md)
+- CIが落ちた / コミット前に整形したい → [09-ci-and-format.md](09-ci-and-format.md)
 
 ## リポジトリ全体の構成
 

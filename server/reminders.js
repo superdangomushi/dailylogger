@@ -6,9 +6,9 @@
 //   取得できるようにする（LINE 未設定でもアプリ側の通知は機能する）。
 // - あわせて一定間隔で、その日の文字起こしから「今日の要約」を生成して保存する。
 
-const db = require("./db");
-const line = require("./line");
-const gemini = require("./gemini");
+const db = require('./db');
+const line = require('./line');
+const gemini = require('./gemini');
 
 // 設定（環境変数で調整可）。
 const REMINDER_INTERVAL_MS = Number(process.env.REMINDER_INTERVAL_SEC || 60) * 1000;
@@ -20,37 +20,37 @@ const WINDOW_1D_MIN = 24 * 60; // 24時間以内
 const WINDOW_1H_MIN = 60; // 1時間以内
 
 function typeLabel(type) {
-  return type === "yotei" ? "予定" : "課題";
+  return type === 'yotei' ? '予定' : '課題';
 }
 
 function fmtDeadline(task) {
-  if (!task.deadline_at) return "期限未定";
+  if (!task.deadline_at) return '期限未定';
   // "YYYY-MM-DD HH:MM:SS" → 日付のみなら時刻を省く。
   const s = String(task.deadline_at);
   return task.date_only ? s.slice(0, 10) : s.slice(0, 16);
 }
 
 function buildMessage(task, when) {
-  const head = when === "1h" ? "【まもなく】1時間以内" : "【リマインド】まもなく1日以内";
+  const head = when === '1h' ? '【まもなく】1時間以内' : '【リマインド】まもなく1日以内';
   return (
     `${head}に${typeLabel(task.type)}の締切です。\n` +
     `・${task.content}\n` +
     `・期限: ${fmtDeadline(task)}` +
-    (task.details ? `\n・メモ: ${task.details}` : "")
+    (task.details ? `\n・メモ: ${task.details}` : '')
   );
 }
 
 // 1回ぶんのリマインドチェック。resolveLineTarget(email) は送信先 userId を返す関数。
 async function checkReminders(resolveLineTarget) {
   for (const [flag, windowMin, when] of [
-    ["notified_1d", WINDOW_1D_MIN, "1d"],
-    ["notified_1h", WINDOW_1H_MIN, "1h"],
+    ['notified_1d', WINDOW_1D_MIN, '1d'],
+    ['notified_1h', WINDOW_1H_MIN, '1h'],
   ]) {
     let due = [];
     try {
       due = await db.findDueTasks(flag, windowMin);
     } catch (e) {
-      console.error("リマインド対象の取得に失敗:", e.message);
+      console.error('リマインド対象の取得に失敗:', e.message);
       continue;
     }
     for (const task of due) {
@@ -62,18 +62,18 @@ async function checkReminders(resolveLineTarget) {
         await db.recordNotification(
           task.email,
           task.id,
-          when === "1h" ? "remind_1h" : "remind_1d",
-          sent ? "line" : "local",
-          message
+          when === '1h' ? 'remind_1h' : 'remind_1d',
+          sent ? 'line' : 'local',
+          message,
         );
         await db.markNotified(task.id, flag);
       } catch (e) {
-        console.error("通知記録に失敗:", e.message);
+        console.error('通知記録に失敗:', e.message);
         continue;
       }
       console.log(
         `リマインド(${when}) ${task.email}: ${task.content} -> ` +
-          `${sent ? "LINE送信" : "記録のみ(アプリ通知用)"}`
+          `${sent ? 'LINE送信' : '記録のみ(アプリ通知用)'}`,
       );
     }
   }
@@ -82,9 +82,9 @@ async function checkReminders(resolveLineTarget) {
 // 指定 email・day の日次要約を生成して保存する。戻り値は要約文字列（材料が無ければ ""）。
 // Gemini APIキーはユーザーごと。未登録ユーザーは静かにスキップする。
 async function generateDailySummary(email, day) {
-  if (!(await gemini.isConfiguredFor(email))) return "";
+  if (!(await gemini.isConfiguredFor(email))) return '';
   const transcripts = await db.getTranscriptsForDay(email, day);
-  if (!transcripts.length) return "";
+  if (!transcripts.length) return '';
   const summary = await gemini.summarizeDay(email, day, transcripts);
   if (summary) await db.saveDailySummary(email, day, summary);
   return summary;
@@ -98,7 +98,7 @@ async function refreshTodaySummaries() {
   try {
     emails = await db.listEmailsForDailySummary(day);
   } catch (e) {
-    console.error("要約対象アカウントの取得に失敗:", e.message);
+    console.error('要約対象アカウントの取得に失敗:', e.message);
     return;
   }
   for (const email of emails) {
@@ -121,7 +121,7 @@ function start(resolveLineTarget) {
   checkReminders(resolveLineTarget).catch((e) => console.error(e));
   reminderTimer = setInterval(
     () => checkReminders(resolveLineTarget).catch((e) => console.error(e)),
-    REMINDER_INTERVAL_MS
+    REMINDER_INTERVAL_MS,
   );
   console.log(`リマインド監視を開始（${REMINDER_INTERVAL_MS / 1000}秒間隔）`);
 
@@ -130,7 +130,7 @@ function start(resolveLineTarget) {
   if (DAILY_SUMMARY_INTERVAL_MS > 0) {
     summaryTimer = setInterval(
       () => refreshTodaySummaries().catch((e) => console.error(e)),
-      DAILY_SUMMARY_INTERVAL_MS
+      DAILY_SUMMARY_INTERVAL_MS,
     );
     console.log(`日次要約の自動生成を開始（${DAILY_SUMMARY_INTERVAL_MS / 60000}分間隔）`);
   }

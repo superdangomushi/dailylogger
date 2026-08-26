@@ -1,4 +1,5 @@
 /audio-worker
+.venv-fmt/
 worker-audio/
 stt/.venv/
 accounts.json

@@ -38,24 +38,34 @@ DAYS = ["月", "火", "水", "木", "金", "土", "日"]
 def make_driver(headful=False):
     from selenium import webdriver
     from selenium.webdriver.chrome.service import Service
+
     opts = webdriver.ChromeOptions()
     if not headful:
         opts.add_argument("--headless=new")
-    for a in ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
-              "--window-size=1920,1080", "--disable-extensions"]:
+    for a in [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+        "--disable-extensions",
+    ]:
         opts.add_argument(a)
-    opts.add_argument("--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    opts.add_argument(
+        "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
     path = os.environ.get("CHROMEDRIVER_PATH")
     if path:
         service = Service(executable_path=path)
     else:
         import shutil
+
         sys_cd = shutil.which("chromedriver")
         if sys_cd:
             service = Service(executable_path=sys_cd)
         else:
             from webdriver_manager.chrome import ChromeDriverManager
+
             service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=opts)
 
@@ -64,19 +74,26 @@ def login(driver, username, password):
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
+
     wait = WebDriverWait(driver, 25)
 
     driver.get(LOGIN_ENTRY)
     time.sleep(3)
     try:
-        links = driver.find_elements(By.XPATH, "//a[contains(text(),'Login') or contains(text(),'ログイン')]")
+        links = driver.find_elements(
+            By.XPATH, "//a[contains(text(),'Login') or contains(text(),'ログイン')]"
+        )
         if links:
-            links[0].click(); time.sleep(3)
+            links[0].click()
+            time.sleep(3)
     except Exception:
         pass
 
     try:
-        wait.until(lambda d: "login.microsoftonline.com" in d.current_url or "my.waseda.jp/portal" in d.current_url)
+        wait.until(
+            lambda d: "login.microsoftonline.com" in d.current_url
+            or "my.waseda.jp/portal" in d.current_url
+        )
     except Exception:
         pass
 
@@ -86,11 +103,15 @@ def login(driver, username, password):
         wait.until(EC.visibility_of_element_located((By.NAME, "passwd"))).send_keys(password)
         wait.until(EC.element_to_be_clickable((By.ID, "idSIButton9"))).click()
         try:
-            wait.until(EC.element_to_be_clickable((By.ID, "idBtn_Back"))).click()  # Stay signed in? → No
+            wait.until(
+                EC.element_to_be_clickable((By.ID, "idBtn_Back"))
+            ).click()  # Stay signed in? → No
         except Exception:
             pass
         try:
-            wait.until(lambda d: "my.waseda.jp/portal" in d.current_url or "waseda.jp" in d.current_url)
+            wait.until(
+                lambda d: "my.waseda.jp/portal" in d.current_url or "waseda.jp" in d.current_url
+            )
         except Exception:
             if "login.microsoftonline.com" in driver.current_url:
                 raise RuntimeError("ログイン未完了（2FA が必要か認証情報が誤り）")
@@ -325,9 +346,11 @@ def fetch_server_credentials():
     if not base or not email or not token:
         return None
     try:
-        r = requests.get(f"{base.rstrip('/')}/api/waseda/credentials",
-                         headers={"X-Account-Email": email, "Authorization": f"Bearer {token}"},
-                         timeout=15)
+        r = requests.get(
+            f"{base.rstrip('/')}/api/waseda/credentials",
+            headers={"X-Account-Email": email, "Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
         j = r.json()
         if r.ok and j.get("ok"):
             print(f"サーバー保存の Waseda アカウントを使用: {j['wasedaUser']}")
@@ -342,10 +365,16 @@ def post_courses(courses):
     base = os.environ["AIHELPER_URL"].rstrip("/")
     email = os.environ["AIHELPER_EMAIL"]
     token = os.environ["AIHELPER_TOKEN"]
-    r = requests.post(f"{base}/api/courses",
-                      headers={"X-Account-Email": email, "Authorization": f"Bearer {token}",
-                               "Content-Type": "application/json"},
-                      data=json.dumps({"courses": courses}), timeout=30)
+    r = requests.post(
+        f"{base}/api/courses",
+        headers={
+            "X-Account-Email": email,
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        data=json.dumps({"courses": courses}),
+        timeout=30,
+    )
     r.raise_for_status()
     print("サーバー登録:", r.json())
 
@@ -357,6 +386,7 @@ def filter_by_current_semester(courses):
     10〜3月 → 秋学期系 (秋, 秋Q, 冬Q, 冬季集中, 通年) を採用
     """
     from datetime import datetime
+
     month = datetime.now().month
     is_spring = 4 <= month <= 9
 
@@ -393,8 +423,10 @@ def main():
         if creds:
             username, password = creds
         else:
-            print("環境変数 WASEDA_ID / WASEDA_PASSWORD か、"
-                  "AIHELPER_URL / AIHELPER_EMAIL / AIHELPER_TOKEN（サーバー保存の資格情報）が必要です")
+            print(
+                "環境変数 WASEDA_ID / WASEDA_PASSWORD か、"
+                "AIHELPER_URL / AIHELPER_EMAIL / AIHELPER_TOKEN（サーバー保存の資格情報）が必要です"
+            )
             sys.exit(1)
 
     driver = make_driver(headful=headful)
@@ -418,7 +450,9 @@ def main():
         if courses and os.environ.get("AIHELPER_URL"):
             post_courses(courses)
         elif not courses:
-            print("科目が抽出できませんでした。--dump で HTML を保存し、parse_timetable を調整してください。")
+            print(
+                "科目が抽出できませんでした。--dump で HTML を保存し、parse_timetable を調整してください。"
+            )
     finally:
         driver.quit()
 

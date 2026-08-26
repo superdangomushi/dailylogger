@@ -170,7 +170,8 @@ inline bool process_one(Account& acc) {
     downloaded = true;
     std::string text = stt::local_transcribe(file_path, quality.empty() ? "high" : quality);
     if (text.empty()) text = "本文なし";
-    const json result = api::post_json(acc, "/api/client/jobs/result", {{"jobId", job_id}, {"text", text}});
+    const json result =
+        api::post_json(acc, "/api/client/jobs/result", {{"jobId", job_id}, {"text", text}});
     const std::string result_name = jstr(result, "filename");
     const long chars = jlong(result, "chars");
     {
@@ -216,7 +217,8 @@ inline void worker_loop() {
     if (unregistered) {
       std::printf(
           "未登録のアカウントが %ld 件あります。"
-          "各アカウントは最初のポーリングで登録フェーズ（このPCのID生成と表示名の登録）を実行します\n",
+          "各アカウントは最初のポーリングで登録フェーズ（このPCのID生成と表示名の登録）を実行します"
+          "\n",
           unregistered);
     }
   }

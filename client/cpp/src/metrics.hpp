@@ -27,8 +27,8 @@ inline CpuTimes read_cpu_times() {
   // 先頭行 "cpu  user nice system idle iowait irq softirq steal ..."
   if (std::fgets(line, sizeof(line), f)) {
     unsigned long long v[10] = {0};
-    const int n = std::sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
-                              &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]);
+    const int n = std::sscanf(line, "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0],
+                              &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8], &v[9]);
     if (n >= 4) {
       for (int i = 0; i < n; i++) t.total += v[i];
       t.idle = v[3] + (n >= 5 ? v[4] : 0);  // idle + iowait
@@ -63,9 +63,12 @@ inline std::optional<double> sample_mem_pct() {
   unsigned long long val;
   while (std::fscanf(f, "%63s %llu kB\n", key, &val) == 2) {
     const std::string k = key;
-    if (k == "MemTotal:") total = val;
-    else if (k == "MemAvailable:") avail = val;
-    else if (k == "MemFree:") free_kb = val;
+    if (k == "MemTotal:")
+      total = val;
+    else if (k == "MemAvailable:")
+      avail = val;
+    else if (k == "MemFree:")
+      free_kb = val;
     if (total && avail) break;
   }
   std::fclose(f);

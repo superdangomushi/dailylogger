@@ -36,6 +36,9 @@ __pycache__/
 .venv/
 venv/
 
+# === フォーマッタ用 venv (make format-deps が作る) ===
+.venv-fmt/
+
 # === 機密・環境設定 ===
 .env
 .env.*

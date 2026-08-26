@@ -1,0 +1,6 @@
+# フォーマッタのバージョン固定。CI と各 Makefile の `make format-deps` が
+# 同じファイルを読むので、手元と CI で整形結果がずれない。
+# clang-format は apt 版だとディストリごとに版が違い結果がぶれるため、
+# あえて pip 版 (公式 LLVM バイナリの wheel) を使う。
+black==26.5.1
+clang-format==20.1.8
