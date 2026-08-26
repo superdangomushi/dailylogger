@@ -146,6 +146,9 @@ class MainActivity : ComponentActivity() {
                         onDownload = viewModel::download,
                         onSelectModel = viewModel::selectModel,
                         onSetServerTranscribe = viewModel::setServerTranscribe,
+                        onEnrollOwnerVoice = viewModel::enrollOwnerVoice,
+                        onCancelOwnerVoiceEnrollment = viewModel::cancelOwnerVoiceEnrollment,
+                        onDeleteOwnerVoice = viewModel::deleteOwnerVoice,
                         onStart = { AudioCaptureService.start(this) },
                         onStop = { AudioCaptureService.stop(this) },
                         onRefresh = viewModel::refresh,
@@ -215,6 +218,9 @@ private fun MainScreen(
     onDownload: (WhisperModel) -> Unit,
     onSelectModel: (WhisperModel) -> Unit,
     onSetServerTranscribe: (Boolean) -> Unit,
+    onEnrollOwnerVoice: () -> Unit,
+    onCancelOwnerVoiceEnrollment: () -> Unit,
+    onDeleteOwnerVoice: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
     onRefresh: () -> Unit,
@@ -265,7 +271,11 @@ private fun MainScreen(
                     Tab(selected = tab == 3, onClick = { tab = 3 }, text = { Text("AI") })
                 }
                 when (tab) {
-                    0 -> RecordingTab(ui, service, onDownload, onSelectModel, onSetServerTranscribe, onStart, onStop)
+                    0 -> RecordingTab(
+                        ui, service, onDownload, onSelectModel, onSetServerTranscribe,
+                        onEnrollOwnerVoice, onCancelOwnerVoiceEnrollment, onDeleteOwnerVoice,
+                        onStart, onStop,
+                    )
                     1 -> RecordsTab(ui, onRefresh, onSend, onLoadServerTranscripts, onLoadServerTranscript)
                     2 -> CalendarTab(ui, onUpdateTask, onDeleteTask, onLoadDaySummary)
                     else -> AiTab(

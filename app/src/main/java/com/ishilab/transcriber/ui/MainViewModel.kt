@@ -8,10 +8,15 @@ import com.ishilab.transcriber.model.WhisperModel
 import com.ishilab.transcriber.net.AccountStore
 import com.ishilab.transcriber.net.AiHelperClient
 import com.ishilab.transcriber.net.BackgroundSync
+import com.ishilab.transcriber.service.AudioCaptureService
+import com.ishilab.transcriber.speaker.OwnerVoiceEnrollmentRecorder
+import com.ishilab.transcriber.speaker.OwnerVoiceProfile
+import com.ishilab.transcriber.speaker.OwnerVoiceProfileStore
 import com.ishilab.transcriber.google.CalendarEvent
 import com.ishilab.transcriber.google.GoogleCalendarClient
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,6 +100,11 @@ data class UiState(
     val sttQuality: String = "high",
     val sttQualityBusy: Boolean = false,
     val sttQualityMessage: String? = null,
+    // オーナー声紋（登録音声は残さず、端末内の特徴量だけを保存）。
+    val ownerVoiceRegistered: Boolean = false,
+    val ownerVoiceEnrolling: Boolean = false,
+    val ownerVoiceEnrollmentProgress: Float = 0f,
+    val ownerVoiceMessage: String? = null,
 ) {
     val anyModelReady: Boolean get() = downloadedModels.isNotEmpty()
     val googleConnected: Boolean get() = googleEmails.isNotEmpty()
@@ -105,14 +115,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val modelManager = ModelManager(app)
     private val accountStore = AccountStore(app)
     private val googleStore = com.ishilab.transcriber.google.GoogleAccountStore(app)
+    private val ownerVoiceStore = OwnerVoiceProfileStore(app)
     private val AIHelper = AiHelperClient()
     private var foregroundSyncJob: Job? = null
+    private var ownerVoiceEnrollmentJob: Job? = null
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui
 
     init {
-        _ui.update { it.copy(account = currentAccount(), serverTranscribe = accountStore.serverTranscribe) }
+        _ui.update {
+            it.copy(
+                account = currentAccount(),
+                serverTranscribe = accountStore.serverTranscribe,
+                ownerVoiceRegistered = ownerVoiceStore.exists(),
+            )
+        }
         refresh()
         // ログイン済みで起動した場合もカレンダー・予定タブにデータが出るよう最初に読み込む。
         if (accountStore.loggedIn) {
@@ -231,6 +249,80 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setServerTranscribe(enabled: Boolean) {
         accountStore.serverTranscribe = enabled
         _ui.update { it.copy(serverTranscribe = enabled) }
+    }
+
+    /**
+     * 12秒間の読み上げからオーナー声紋を登録する。録音データは処理後すぐ破棄し、
+     * 自動バックアップ対象外の端末領域には音響特徴量だけを保存する。
+     */
+    fun enrollOwnerVoice() {
+        if (ownerVoiceEnrollmentJob?.isActive == true) return
+        if (AudioCaptureService.state.value.active) {
+            _ui.update { it.copy(ownerVoiceMessage = "通常の録音を終了してから声を登録してください") }
+            return
+        }
+        _ui.update {
+            it.copy(
+                ownerVoiceEnrolling = true,
+                ownerVoiceEnrollmentProgress = 0f,
+                ownerVoiceMessage = null,
+            )
+        }
+        ownerVoiceEnrollmentJob = viewModelScope.launch {
+            try {
+                val samples = withContext(Dispatchers.IO) {
+                    OwnerVoiceEnrollmentRecorder.record(getApplication<Application>()) { progress ->
+                        _ui.update { it.copy(ownerVoiceEnrollmentProgress = progress) }
+                    }
+                }
+                val profile = withContext(Dispatchers.Default) {
+                    OwnerVoiceProfile.fromEnrollment(samples)
+                } ?: throw IllegalStateException(
+                    "声を十分に検出できませんでした。静かな場所で、12秒間はっきり話してください"
+                )
+                withContext(Dispatchers.IO) { ownerVoiceStore.save(profile) }
+                _ui.update {
+                    it.copy(
+                        ownerVoiceRegistered = true,
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 1f,
+                        ownerVoiceMessage = "オーナーの声を登録しました",
+                    )
+                }
+            } catch (_: CancellationException) {
+                _ui.update {
+                    it.copy(
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = "声の登録を中止しました",
+                    )
+                }
+            } catch (e: Exception) {
+                _ui.update {
+                    it.copy(
+                        ownerVoiceEnrolling = false,
+                        ownerVoiceEnrollmentProgress = 0f,
+                        ownerVoiceMessage = e.message ?: "声の登録に失敗しました",
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelOwnerVoiceEnrollment() {
+        ownerVoiceEnrollmentJob?.cancel()
+    }
+
+    fun deleteOwnerVoice() {
+        if (ownerVoiceEnrollmentJob?.isActive == true) return
+        ownerVoiceStore.delete()
+        _ui.update {
+            it.copy(
+                ownerVoiceRegistered = false,
+                ownerVoiceEnrollmentProgress = 0f,
+                ownerVoiceMessage = "登録した声紋を削除しました",
+            )
+        }
     }
 
     /** 文字起こしに使うモデルを選び直す（ダウンロード済みのモデルのみ）。 */

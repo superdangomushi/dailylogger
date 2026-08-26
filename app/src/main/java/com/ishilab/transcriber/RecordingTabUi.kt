@@ -90,6 +90,7 @@ import com.ishilab.transcriber.service.NotificationPrefs
 import com.ishilab.transcriber.service.ServiceState
 import com.ishilab.transcriber.service.TravelAssistant
 import com.ishilab.transcriber.service.TravelPrefs
+import com.ishilab.transcriber.speaker.OwnerVoiceProfile
 import com.ishilab.transcriber.ui.ChatMessage
 import com.ishilab.transcriber.ui.MainViewModel
 import com.ishilab.transcriber.ui.TranscriptItem
@@ -107,6 +108,9 @@ internal fun RecordingTab(
     onDownload: (WhisperModel) -> Unit,
     onSelectModel: (WhisperModel) -> Unit,
     onSetServerTranscribe: (Boolean) -> Unit,
+    onEnrollOwnerVoice: () -> Unit,
+    onCancelOwnerVoiceEnrollment: () -> Unit,
+    onDeleteOwnerVoice: () -> Unit,
     onStart: () -> Unit,
     onStop: () -> Unit,
 ) {
@@ -121,12 +125,22 @@ internal fun RecordingTab(
 
         item { TranscribeModeCard(ui, onSetServerTranscribe) }
 
+        item {
+            OwnerVoiceCard(
+                ui = ui,
+                service = service,
+                onEnroll = onEnrollOwnerVoice,
+                onCancel = onCancelOwnerVoiceEnrollment,
+                onDelete = onDeleteOwnerVoice,
+            )
+        }
+
         if (!ui.serverTranscribe) {
             item { ModelCard(ui, onDownload, onSelectModel) }
         }
 
         if (ui.anyModelReady || ui.serverTranscribe) {
-            item { ControlRow(service, onStart, onStop) }
+            item { ControlRow(service, ui.ownerVoiceEnrolling, onStart, onStop) }
         }
 
         service.error?.let { err ->
@@ -135,6 +149,76 @@ internal fun RecordingTab(
 
         ui.sendMessage?.let { msg ->
             item { Text(msg, style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+/** オーナーの声を登録し、ローカル文字起こしへ話者ラベルを付けるためのカード。 */
+@Composable
+internal fun OwnerVoiceCard(
+    ui: UiState,
+    service: ServiceState,
+    onEnroll: () -> Unit,
+    onCancel: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("オーナーの声", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (ui.ownerVoiceRegistered) "登録済み（話者識別 ON）" else "未登録",
+                color = if (ui.ownerVoiceRegistered) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "12秒間の声から端末内に声紋を作り、文字起こしを［オーナー］／［他人］で表示します。登録音声は保存しません。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (ui.serverTranscribe) {
+                Text(
+                    "※ 話者ラベルは現在「端末で処理」のときだけ付きます。",
+                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+
+            if (ui.ownerVoiceEnrolling) {
+                Text(
+                    "普段の声で続けて読んでください：今日は予定を確認して、必要な連絡と買い物を済ませます。",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                LinearProgressIndicator(
+                    progress = { ui.ownerVoiceEnrollmentProgress },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "録音中 ${(ui.ownerVoiceEnrollmentProgress * OwnerVoiceProfile.ENROLLMENT_SECONDS).toInt()} / ${OwnerVoiceProfile.ENROLLMENT_SECONDS}秒",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedButton(onClick = onCancel) { Text("中止") }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = onEnroll,
+                        enabled = !service.active && !service.draining,
+                    ) {
+                        Text(if (ui.ownerVoiceRegistered) "声を再登録" else "声を登録")
+                    }
+                    if (ui.ownerVoiceRegistered) {
+                        OutlinedButton(
+                            onClick = onDelete,
+                            enabled = !service.active && !service.draining,
+                        ) { Text("削除") }
+                    }
+                }
+                if (service.active || service.draining) {
+                    Text("声の登録・削除は通常の録音を終了してから行えます。", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            ui.ownerVoiceMessage?.let { message ->
+                Text(message, style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
@@ -169,6 +253,13 @@ internal fun StatusCard(service: ServiceState) {
                 Text("$pct%", style = MaterialTheme.typography.bodySmall)
             }
             service.modelName?.let { Text("モデル: $it") }
+            service.lastSpeaker?.let { speaker ->
+                val score = service.lastSpeakerSimilarity
+                Text(
+                    if (score != null) "直近の話者: $speaker（声紋一致度 ${(score * 100).toInt().coerceIn(0, 100)}%）"
+                    else "直近の話者: $speaker",
+                )
+            }
             Text("処理済: ${service.chunksDone} 区間  待機: ${service.queueSize} 区間")
             service.currentFile?.let { Text("最新の出力: $it") }
             if (service.lastText.isNotBlank()) {
@@ -209,15 +300,23 @@ internal fun formatDuration(ms: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
 }
 @Composable
-internal fun ControlRow(service: ServiceState, onStart: () -> Unit, onStop: () -> Unit) {
+internal fun ControlRow(
+    service: ServiceState,
+    ownerVoiceEnrolling: Boolean,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Button(onClick = onStart, enabled = !service.active) { Text("録音開始") }
+        Button(onClick = onStart, enabled = !service.active && !ownerVoiceEnrolling) { Text("録音開始") }
         OutlinedButton(onClick = onStop, enabled = service.active) { Text("終了") }
     }
     Text(
         "※ 一時停止/再開は通知バーのボタンから行えます。",
         style = MaterialTheme.typography.bodySmall
     )
+    if (ownerVoiceEnrolling) {
+        Text("声の登録中は通常録音を開始できません。", style = MaterialTheme.typography.bodySmall)
+    }
 }
 /**
  * 文字起こし方法の選択カード。

@@ -76,5 +76,6 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.play.services.auth)
+    testImplementation(kotlin("test"))
     debugImplementation(libs.androidx.ui.tooling)
 }
